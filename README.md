@@ -19,6 +19,6 @@
 ```sh
 git clone https://github.com/rap0at/RAPOAT.git
 chmod 777 *
-pip3 install -r requirements.txt
+pip3 install -r requirements-kali.txt or requirements-termux.txt
 python3 rapoat.py
 ```
