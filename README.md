@@ -22,3 +22,8 @@ chmod 777 *
 pip3 install -r requirements-kali.txt or requirements-termux.txt
 python3 rapoat.py
 ```
+
+## In case of lxml html err
+```sh
+pip3 install 'lxml[html_clean]'
+```
