@@ -17,6 +17,7 @@
 
 - AI MODE
 <img width="909" height="650" alt="ai" src="https://github.com/user-attachments/assets/04690171-0627-4f87-bee0-47433716f53a" />
+
 ## Gemini API key require
 ```sh
 https://ai.google.dev/gemini-api/docs/api-key
