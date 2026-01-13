@@ -10,6 +10,7 @@
 
 - WEB MODE
 <img width="953" height="363" alt="web" src="https://github.com/user-attachments/assets/42859a85-0f32-4b45-8be7-a391c04e9b0b" />
+<img width="1228" height="918" alt="2026-01-14 05 25 13" src="https://github.com/user-attachments/assets/b1c08f09-0156-4944-b1ea-ef2204575673" />
 
 - TERMINAL MODE
 <img width="850" height="239" alt="ter" src="https://github.com/user-attachments/assets/340dbb54-4502-457f-b49d-7eb787186041" />
