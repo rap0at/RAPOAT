@@ -13,7 +13,7 @@
 <img width="1228" height="918" alt="2026-01-14 05 25 13" src="https://github.com/user-attachments/assets/b1c08f09-0156-4944-b1ea-ef2204575673" />
 
 - TERMINAL MODE
-<img width="850" height="239" alt="ter" src="https://github.com/user-attachments/assets/340dbb54-4502-457f-b49d-7eb787186041" />
+<img width="849" height="585" alt="ter,oma;" src="https://github.com/user-attachments/assets/c77fd833-e3e2-41d3-852e-1976e49f47b8" />
 
 - AI MODE
 <img width="909" height="650" alt="ai" src="https://github.com/user-attachments/assets/04690171-0627-4f87-bee0-47433716f53a" />
