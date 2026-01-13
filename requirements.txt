@@ -1,5 +1,6 @@
 requests
-flask
+Flask
 pymongo
 beautifulsoup4
 requests-html
+google-genai
