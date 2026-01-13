@@ -6,10 +6,11 @@
 ## Features
 
 - Main Page
-<img width="844" height="162" alt="2026-01-12 06 59 31" src="https://github.com/user-attachments/assets/da28160a-fa6c-4881-bfb2-20b71327c7f6" />
+<img width="1228" height="918" alt="2026-01-14 05 25 13" src="https://github.com/user-attachments/assets/45d87d41-fb0a-48be-95e8-4e8b4462dfe3" />
+
 
 - WEB MODE
-<img width="953" height="363" alt="web" src="https://github.com/user-attachments/assets/42859a85-0f32-4b45-8be7-a391c04e9b0b" />
+<img width="1703" height="845" alt="2026-01-14 05 32 27" src="https://github.com/user-attachments/assets/7c74abb0-ccb6-4978-bcd8-bad01481f68a" />
 <img width="1228" height="918" alt="2026-01-14 05 25 13" src="https://github.com/user-attachments/assets/b1c08f09-0156-4944-b1ea-ef2204575673" />
 
 - TERMINAL MODE
