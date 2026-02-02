@@ -4,3 +4,8 @@ pymongo
 beautifulsoup4
 requests-html
 google-genai
+google-generativeai
+chromium
+urllib3
+playwright
+tqdm
