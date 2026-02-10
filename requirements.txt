@@ -9,3 +9,5 @@ chromium
 urllib3
 playwright
 tqdm
+aiohttp
+aiohttp-socks
