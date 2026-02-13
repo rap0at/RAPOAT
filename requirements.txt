@@ -1,13 +1,29 @@
-requests
+# Python Libraries
 Flask
 pymongo
 beautifulsoup4
 requests-html
-google-genai
-google-generativeai
-chromium
-urllib3
 playwright
-tqdm
+google-generativeai
 aiohttp
-aiohttp-socks
+tqdm
+urllib3
+
+# -------------------------------------------------
+# External Tool Dependencies
+# -------------------------------------------------
+# For the tool to function fully, the following command-line tools must be installed and available in your system's PATH.
+# 이 도구의 모든 기능을 사용하려면, 다음 명령줄 도구들이 시스템에 설치되어 있고 PATH에 잡혀 있어야 합니다.
+#
+# - nmap
+# - nikto
+# - nuclei
+
+# -------------------------------------------------
+# Playwright Browser Installation
+# -------------------------------------------------
+# After installing the python libraries, you must install the necessary browser binaries for Playwright.
+# 파이썬 라이브러리를 설치한 후, Playwright에 필요한 브라우저 바이너리를 반드시 설치해야 합니다.
+#
+# Run the following command (다음 명령어를 실행하세요):
+# playwright install
