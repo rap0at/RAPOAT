@@ -4774,7 +4774,7 @@ def brute_force_login(target, output, tech, report, session_cookies=None, specif
         *[f'pass{str(i).zfill(3)}' for i in range(100)], # pass000, pass001, ...
     ]
 
-async async def brute_force_login(target, output, tech, report, session_cookies=None, specific_form=None):
+async def brute_force_login(target, output, tech, report, session_cookies=None, specific_form=None):
     output.print(f"\n[+] Starting Brute Force Attack on Web Login at {target}...")
     
     # v7.0 - 500+ Usernames
