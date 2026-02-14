@@ -3,11 +3,17 @@ Flask
 pymongo
 beautifulsoup4
 requests-html
+requests_html
 playwright
 google-generativeai
 aiohttp
 tqdm
 urllib3
+configparser
+paramiko
+pysmb
+pysnmp
+dnspython
 
 # -------------------------------------------------
 # External Tool Dependencies
