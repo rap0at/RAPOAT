@@ -26,8 +26,8 @@ https://ai.google.dev/gemini-api/docs/api-key
 ## Installation
 ```sh
 git clone https://github.com/rap0at/RAPOAT.git
-sudo apt install -y nmap nikto nuclei smbclient snmpd snmp dig
 sudo apt update
+sudo apt install -y nmap && nikto && nuclei && smbclient && subfinder && gospider && snmpd && snmp && dig && ftp && sshpass && dnsutils
 chmod 777 *
 pip3 install -r requirements.txt
 playwright install chromium
