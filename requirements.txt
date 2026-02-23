@@ -14,6 +14,7 @@ paramiko
 pysmb
 pysnmp
 dnspython
+colorama
 
 # -------------------------------------------------
 # External Tool Dependencies
