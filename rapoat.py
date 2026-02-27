@@ -1220,12 +1220,11 @@ async def _send_async_http_request(url, method='GET', data=None, headers=None, c
     }
 
     try:
-        async with aiohttp.ClientSession(cookies=aiohttp_cookies) as session:
-            # aiohttp는 verify_ssl을 connector_args로 받습니다.
-            connector = aiohttp.TCPConnector(ssl=False) if not verify_ssl else None
-            
+        # aiohttp는 verify_ssl을 connector_args로 받습니다.
+        connector = aiohttp.TCPConnector(ssl=False) if not verify_ssl else None
+        async with aiohttp.ClientSession(cookies=aiohttp_cookies, connector=connector) as session:
             # aiohttp는 allow_redirects를 request 메서드의 인자로 받습니다.
-            async with session.request(method, url, data=data, headers=req_headers, timeout=timeout, allow_redirects=allow_redirects, connector=connector) as res:
+            async with session.request(method, url, data=data, headers=req_headers, timeout=timeout, allow_redirects=allow_redirects) as res:
                 response_details['status_code'] = res.status
                 response_details['headers'] = dict(res.headers)
                 response_details['text'] = await res.text()
@@ -3425,7 +3424,7 @@ async def check_sql_injection(target, form_to_test, output, tech, report, sessio
         if vulnerability_found:
             continue
         
-        report.add_check(f"SQLi Check on {point['param']}", "No vulnerability found")
+        report.add_check(f"SQLi Check on param '{point['param']}' at {point['url']}", "No vulnerability found")
 
     output.print(f"  [INFO] SQL Injection scan completed for target {target}.")
 
@@ -3698,7 +3697,7 @@ async def check_command_injection(target, form_to_test, output, tech, report, se
         if vulnerability_found:
             continue
             
-        report.add_check(f"Command Injection on {point['param']}", "No vulnerability found")
+        report.add_check(f"Command Injection on param '{point['param']}' at {point['url']}", "No vulnerability found")
 
     output.print("  [INFO] Command Injection scan completed.")
 
@@ -3849,7 +3848,7 @@ async def check_xss(target, form_to_test, output, tech, report, session_cookies=
         if vulnerability_found:
             continue
             
-        report.add_check(f"XSS Check on {point['param']}", "No vulnerability found")
+        report.add_check(f"XSS Check on param '{point['param']}' at {point['url']}", "No vulnerability found")
 
     output.print("  [INFO] XSS scan completed.")
 
@@ -4754,7 +4753,7 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
         if vulnerability_found:
             continue
             
-        report.add_check(f"LDAP Injection on {point['param']}", "No vulnerability found")
+        report.add_check(f"LDAP Injection on param '{point['param']}' at {point['url']}", "No vulnerability found")
 
     output.print("  [INFO] LDAP Injection scan completed.")
 
@@ -4999,9 +4998,9 @@ async def check_ssrf(target, form_to_test, output, tech, report, session_cookies
         else:
             # If not found, but there's evidence (e.g., OOB attempt), add it as an informational check
             if ssrf_evidence:
-                report.add_check(f"SSRF Check on {point['param']}", f"No direct vulnerability found. {ssrf_evidence[0]}")
+                report.add_check(f"SSRF Check on param '{point['param']}' at {point['url']}", f"No direct vulnerability found. {ssrf_evidence[0]}")
             else:
-                report.add_check(f"SSRF Check on {point['param']}", "No vulnerability found")
+                report.add_check(f"SSRF Check on param '{point['param']}' at {point['url']}", "No vulnerability found")
     
     output.print("  [INFO] No SSRF detected after all checks.")
 
@@ -5195,7 +5194,7 @@ async def check_idor(target, output, tech, report, session_cookies=None, discove
         if vulnerability_found:
             continue
 
-        report.add_check(f"IDOR Check on {point['param_name']}", "No vulnerability found")
+        report.add_check(f"IDOR Check on param '{point['param_name']}' at {point['original_url']}", "No vulnerability found")
     
     output.print("  [INFO] IDOR scan completed.")
 
@@ -5484,8 +5483,8 @@ async def check_xxe(target, form_to_test, output, tech, report, session_cookies=
                 return # Found a vulnerability, exit the entire function
     
     if not found_xxe:
-        output.print("  [INFO] No XXE detected after all checks.")
-        report.add_check("XXE Scan", "No vulnerability found")
+        output.print(f"  [INFO] No XXE detected for target {target} after all checks.")
+        report.add_check(f"XXE Scan on {target}", "No vulnerability found")
 
 # --- 14. Brute Force Login ---
 def brute_force_login(target, output, tech, report, session_cookies=None, specific_form=None):
@@ -6036,6 +6035,7 @@ async def brute_force_login(target, output, tech, report, session_cookies=None, 
 
         failed_attempts = 0
         lockout_detected = False
+        creds_found_for_this_form = False
         
         credentials_to_test = product(usernames, passwords)
 
@@ -6078,7 +6078,8 @@ async def brute_force_login(target, output, tech, report, session_cookies=None, 
                 if is_success_indicator and not is_failure:
                     output.print(f"  [CRITICAL] Credentials found: {user}:{pwd} on {action_url}")
                     report.add_finding("Weak Credentials for Web Login", "Critical", action_url, f"{user_param}, {pass_param}", f"{user}:{pwd}", "Weak or default credentials were successfully used to log into a web panel.", "Enforce a strong password policy and Multi-Factor Authentication (MFA). Avoid using default or easily guessable credentials.", f"Login URL: {action_url}\nSuccessful Credentials: {user}:{pwd}", method='POST', request_details=request_details, response_details=response_details)
-                    return # Exit after finding first credential
+                    creds_found_for_this_form = True
+                    break # Exit after finding first credential
                 else:
                     failed_attempts += 1
             else:
@@ -6086,8 +6087,12 @@ async def brute_force_login(target, output, tech, report, session_cookies=None, 
             
             if failed_attempts > 20 and failed_attempts % 20 == 0:
                 output.print(f"    [INFO] {failed_attempts} failed attempts. Continuing...")
+        
+        if not creds_found_for_this_form:
+            report.add_check(f"Brute Force on {action_url}", "Completed without finding credentials.")
 
-    report.add_check(f"Brute Force on {target}", "Completed without finding credentials.")
+    # This check is now handled within the loop for each form.
+    # report.add_check(f"Brute Force on {target}", "Completed without finding credentials.")
 
 # --- 15. File Inclusion (Directory Traversal) ---
 async def check_file_inclusion(target, form_to_test, output, tech, report, session_cookies=None):
@@ -6476,7 +6481,7 @@ async def check_file_inclusion(target, form_to_test, output, tech, report, sessi
         
         if not found_vulnerability:
             output.print(f"  [INFO] No File Inclusion detected for {point['method'].upper()} parameter '{point['param']}' at {point['url']} after all checks.")
-            report.add_check(f"File Inclusion Check on {point['param']}", "No vulnerability found")
+            report.add_check(f"File Inclusion Check on param '{point['param']}' at {point['url']}", "No vulnerability found")
 
 
 
@@ -7063,7 +7068,8 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies=
     nmap_output_file_path = None # Initialize nmap_output_file_path
     try:
         await profile_target(base_url, output_handler, tech, report, session_cookies=session_cookies)
-        nmap_output_file_path = await scan_nmap(base_url, output_handler, tech, report, session_cookies=session_cookies) # Capture nmap output path
+        # These discovery scans are target-level and should run once.
+        await scan_nmap(base_url, output_handler, tech, report, session_cookies=session_cookies)
         await scan_nikto(base_url, output_handler, tech, report, session_cookies=session_cookies)
         await scan_nuclei(base_url, output_handler, tech, report, session_cookies=session_cookies)
     except Exception as e:
@@ -7079,144 +7085,115 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies=
         output_handler.print(f"  [ERROR] Advanced spider failed catastrophically: {e}\nTraceback:\n{error_traceback}")
         discovered_urls, discovered_forms = [], []
 
+    # --- PHASE 1.5: AI-DRIVEN TARGET ANALYSIS ---
     recommended_attacks = []
     if ai_enabled and ai_reorder_attacks:
         recommended_attacks = await ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_forms, output_handler)
 
-    # --- PHASE 2: ATTACK & EXPLOITATION (Phased) ---
-    all_possible_attacks = [
-        check_sql_injection, check_xss, check_command_injection,
-        check_idor, check_http_smuggling, check_ldap_injection,
-        scan_exposed_services, # scan_exposed_services is already here
-        scan_and_exploit_mongodb, scan_rtsp, check_insecure_deserialization,
-        check_graphql_injection, check_cors, check_crlf, check_open_redirect, check_ssrf,
-        scan_react2shell, check_xxe, check_csrf, check_file_inclusion, brute_force_login
+    # --- PHASE 2: ATTACK & EXPLOITATION (Categorized & Phased) ---
+    
+    # 1. Categorize attacks
+    target_level_attacks = [
+        scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, 
+        check_http_smuggling, check_graphql_injection, scan_react2shell
+    ]
+    url_level_attacks = [
+        check_sql_injection, check_xss, check_command_injection, check_idor, 
+        check_ldap_injection, check_insecure_deserialization, check_cors, 
+        check_crlf, check_open_redirect, check_ssrf, check_xxe, check_csrf, 
+        check_file_inclusion, brute_force_login
     ]
 
-    attack_func_map = {func.__name__: func for func in all_possible_attacks}
+    # 2. Handle scan_type selection
+    if scan_type != 'full':
+        scan_type_map = {
+            'exposed_services': [scan_exposed_services],
+            'xss': [check_xss],
+            'sqli': [check_sql_injection],
+            'lfi': [check_file_inclusion],
+            'cmdi': [check_command_injection],
+            'rce': [check_command_injection, check_insecure_deserialization] # Example for RCE
+        }
+        # Filter both lists to only include the selected scan type
+        selected_attacks = scan_type_map.get(scan_type, [])
+        target_level_attacks = [func for func in target_level_attacks if func in selected_attacks]
+        url_level_attacks = [func for func in url_level_attacks if func in selected_attacks]
+        if not target_level_attacks and not url_level_attacks:
+            output_handler.print(f"[WARNING] Scan type '{scan_type}' not found or has no associated modules. Running a full scan instead.")
+            # Re-populate for a full scan if selection was invalid
+            target_level_attacks = [scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, check_http_smuggling, check_graphql_injection, scan_react2shell]
+            url_level_attacks = [check_sql_injection, check_xss, check_command_injection, check_idor, check_ldap_injection, check_insecure_deserialization, check_cors, check_crlf, check_open_redirect, check_ssrf, check_xxe, check_csrf, check_file_inclusion, brute_force_login]
 
-    if recommended_attacks:
+    # 3. AI-based reordering (if enabled)
+    if ai_enabled and ai_reorder_attacks and recommended_attacks:
         output_handler.print(f"\n[AI MODE] Reordering attacks based on AI recommendations: {', '.join(recommended_attacks)}")
-        prioritized_attacks = []
-        seen_attacks = set()
-        for rec_name in recommended_attacks:
-            if rec_name in attack_func_map and rec_name not in seen_attacks:
-                prioritized_attacks.append(attack_func_map[rec_name])
-                seen_attacks.add(rec_name)
-        for attack_func in all_possible_attacks:
-            if attack_func.__name__ not in seen_attacks:
-                prioritized_attacks.append(attack_func)
-        primary_attacks = prioritized_attacks[:6]
-        secondary_attacks = prioritized_attacks[6:]
-    elif scan_type == 'exposed_services': # New: Specific scan type for exposed services
-        primary_attacks = [scan_exposed_services]
-        secondary_attacks = []
-    elif scan_type == 'xss': # New: Specific scan type for XSS
-        primary_attacks = [check_xss]
-        secondary_attacks = []
-    elif scan_type == 'sqli': # New: Specific scan type for SQLi
-        primary_attacks = [check_sql_injection]
-        secondary_attacks = []
-    elif scan_type == 'lfi': # New: Specific scan type for LFI
-        primary_attacks = [check_file_inclusion] # Assuming check_file_inclusion covers LFI
-        secondary_attacks = []
-    elif scan_type == 'cmdi': # New: Specific scan type for CMDi
-        primary_attacks = [check_command_injection]
-        secondary_attacks = []
-    elif scan_type == 'rce': # New: Specific scan type for RCE
-        # Assuming RCE is covered by check_command_injection or other specific RCE modules
-        # For now, let's map it to check_command_injection if no dedicated RCE function exists
-        primary_attacks = [check_command_injection] 
-        secondary_attacks = []
-    else: # Default to full scan
-        primary_attacks = [
-            check_sql_injection, check_xss, check_command_injection,
-            check_idor, check_http_smuggling, check_ldap_injection,
-            scan_exposed_services
-        ]
-        secondary_attacks = [
-            scan_and_exploit_mongodb, scan_rtsp, check_insecure_deserialization,
-            check_graphql_injection, check_cors, check_crlf, check_open_redirect, check_ssrf,
-            scan_react2shell, check_xxe, check_csrf, check_file_inclusion, brute_force_login
-        ]
-
-    all_targets = set(discovered_urls)
-    for form in discovered_forms:
-        all_targets.add(form['action'])
-
-    completed_tasks_counter = {'count': 0, 'lock': threading.Lock()}
-    total_tasks = [len(all_targets) * len(primary_attacks)]
-
-    def execute_attack_phase(phase_name, attack_definitions):
-        global attack_progress
-        output_handler.print("\n" + "="*50)
-        output_handler.print(f"  {phase_name} (Running with {num_threads} threads)")
-        output_handler.print("="*50)
-
-        tasks = []
-        for url in all_targets:
-            form_to_test = next((f for f in discovered_forms if f['action'] == url), None)
-            for attack_func in attack_definitions:
-                args = (attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, nmap_output_file_path) # Added nmap_output_file_path
-                tasks.append(args)
         
+        def reorder_list(attack_list, recommendations):
+            prioritized = [attack for rec in recommendations if (attack := next((a for a in attack_list if a.__name__ == rec), None))]
+            remaining = [attack for attack in attack_list if attack not in prioritized]
+            return prioritized + remaining
+
+        target_level_attacks = reorder_list(target_level_attacks, recommended_attacks)
+        url_level_attacks = reorder_list(url_level_attacks, recommended_attacks)
+
+    # 4. Define execution logic
+    def execute_tasks(phase_name, tasks):
+        global attack_progress
         if not tasks:
             output_handler.print(f"  [INFO] No tasks to execute for {phase_name}.")
             return
 
+        output_handler.print("\n" + "="*50)
+        output_handler.print(f"  {phase_name} (Running with {num_threads} threads)")
+        output_handler.print("="*50)
+
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            future_to_task = {executor.submit(_run_single_attack, task): task for task in tasks}
+            futures = [executor.submit(_run_single_attack, task) for task in tasks]
             
+            progress_bar_desc = f"{phase_name} Progress"
             if isinstance(output_handler, TerminalOutput):
-                with tqdm(total=len(tasks), desc=f"{phase_name} Progress", unit="task", dynamic_ncols=True, position=0, leave=True) as pbar:
-                    for future in as_completed(future_to_task):
-                        with completed_tasks_counter['lock']:
-                            completed_tasks_counter['count'] += 1
-                            if total_tasks[0] > 0:
-                                attack_progress = (completed_tasks_counter['count'] / total_tasks[0]) * 100
+                with tqdm(total=len(futures), desc=progress_bar_desc, unit="task", dynamic_ncols=True) as pbar:
+                    for future in as_completed(futures):
                         try:
                             future.result()
                         except Exception as exc:
                             output_handler.print(f'\n[ERROR] A task in {phase_name} generated an exception: {exc}')
                         finally:
                             pbar.update(1)
-            else:
-                for future in as_completed(future_to_task):
-                    with completed_tasks_counter['lock']:
-                        completed_tasks_counter['count'] += 1
-                        if total_tasks[0] > 0:
-                            attack_progress = (completed_tasks_counter['count'] / total_tasks[0]) * 100
+            else: # For Web UI, just process them
+                for future in as_completed(futures):
                     try:
                         future.result()
                     except Exception as exc:
                         output_handler.print(f'\n[ERROR] A task in {phase_name} generated an exception: {exc}')
 
-    # --- Orchestration Logic ---
-    execute_attack_phase("PHASE 2.1: PRIMARY ATTACK", primary_attacks)
-    output_handler.print("\n[INFO] Primary attack phase completed.")
-
-    # --- NEW: Generate Interim Report for Primary Phase ---
-    interim_report_filename = f"report_primary_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
-    output_handler.print(f"\n[INFO] Generating primary phase report: {interim_report_filename}")
-    report.write_to_file(interim_report_filename)
-
-    continue_scan = 'y'
-    if isinstance(output_handler, TerminalOutput):
-        try:
-            continue_scan = input("  [?] Continue with all secondary attack modules? (Y/N): ").lower()
-        except (EOFError, KeyboardInterrupt):
-            continue_scan = 'n'
-            output_handler.print("\n[INFO] Scan interrupted by user.")
+    # --- 5. Orchestration ---
     
-    if continue_scan == 'y':
-        total_tasks[0] += len(all_targets) * len(secondary_attacks)
-        execute_attack_phase("PHASE 2.2: SECONDARY ATTACK", secondary_attacks)
-        output_handler.print("\n[INFO] Secondary attack phase completed.")
-        return True # Indicate that secondary scan was run
-    else:
-        if isinstance(output_handler, TerminalOutput):
-            output_handler.print("\n[INFO] Skipping secondary attack modules.")
-        return False # Indicate that secondary scan was skipped
+    # Execute Target-Level Attacks (Primary Phase)
+    primary_target_tasks = []
+    for attack_func in target_level_attacks:
+        # These attacks run against the base_url, no need for form_to_test here
+        args = (attack_func, base_url, None, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, nmap_output_file_path)
+        primary_target_tasks.append(args)
+    execute_tasks("PHASE 2.1: TARGET-LEVEL ATTACKS", primary_target_tasks)
+
+    # Execute URL-Level Attacks (Primary Phase)
+    primary_url_tasks = []
+    all_url_targets = set(discovered_urls)
+    for form in discovered_forms:
+        all_url_targets.add(form['action'])
+        
+    for url in all_url_targets:
+        form_to_test = next((f for f in discovered_forms if f['action'] == url), None)
+        for attack_func in url_level_attacks:
+            args = (attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, nmap_output_file_path)
+            primary_url_tasks.append(args)
+    execute_tasks("PHASE 2.2: URL-LEVEL ATTACKS", primary_url_tasks)
+
+    output_handler.print("\n[INFO] All attack phases completed.")
+    
+    # For now, we always return True to generate the final report. The old logic of splitting primary/secondary reports is removed for simplification.
+    return True
 # =================================================================================
 # 6. Flask 라우트 및 메인 실행 (v5.5 Ultimate Pro Max)
 # =================================================================================
