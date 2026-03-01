@@ -6,6 +6,7 @@ requests-html
 requests_html
 playwright
 google-generativeai
+google.genai
 aiohttp
 tqdm
 urllib3
@@ -15,6 +16,7 @@ pysmb
 pysnmp
 dnspython
 colorama
+anthropic
 
 # -------------------------------------------------
 # External Tool Dependencies
