@@ -7018,10 +7018,20 @@ if __name__ == '__main__':
                     # Fallback for older library versions
                     print("  [INFO] Older 'google-generativeai' version detected. Using environment variable fallback.")
                     os.environ['GOOGLE_API_KEY'] = gemini_api_key
-                    GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
-                    print("  [INFO] Gemini API client configured successfully via fallback.")
+                    try:
+                        GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
+                        print("  [INFO] Gemini API client configured successfully via fallback.")
+                    except AttributeError:
+                        print("\n" + "="*60)
+                        print("  [CRITICAL GEMINI ERROR] Incompatible 'google-generativeai' library version.")
+                        print("  Your library version is too old to use the 'gemini-1.5-flash' model.")
+                        print("  [ACTION] Please upgrade the library by running:")
+                        print("           pip install --upgrade google-generativeai")
+                        print("="*60 + "\n")
+                        GEMINI_MODEL = None # Set to None so the program can continue with Claude
                 except Exception as e:
                     print(f"  [ERROR] Failed to configure Gemini API: {e}")
+                    GEMINI_MODEL = None
             
             if claude_api_key:
                 try:
