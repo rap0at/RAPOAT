@@ -18,11 +18,12 @@ import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests_html import HTMLSession
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 import html
 import configparser
 import google.genai as genai
 import anthropic
+from colorama import Fore, Style # Added this line
 import urllib3
 import aiohttp
 import asyncio
@@ -1275,7 +1276,7 @@ async def spider_target(base_url, output, session_cookies=None):
 
     # 1. JS 렌더링을 통한 수집 (Playwright)
     try:
-        with sync_playwright() as p:
+        async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             context = await browser.new_context(ignore_https_errors=True)
             if session_cookies:
@@ -6402,9 +6403,19 @@ async def ai_generate_dynamic_payloads(vulnerability_type, base_payload, respons
                 ]
             )
             return message.content[0].text
-        except Exception as e:
-            output.print(f"  [AI ERROR - Claude] Failed to generate payloads: {e}")
-            return ""
+        except Exception as e_haiku:
+            output.print(f"  [AI WARNING - Claude] Could not use primary model 'claude-3-haiku-20240307' (Reason: {e_haiku}). Trying fallback 'claude-3-sonnet-20240229'.")
+            # If Haiku fails, try fallback model (Sonnet)
+            try:
+                message = CLAUDE_MODEL.messages.create(
+                    model="claude-3-sonnet-20240229",
+                    max_tokens=1024,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                return message.content[0].text
+            except Exception as e_sonnet:
+                output.print(f"  [AI ERROR - Claude] Fallback model 'claude-3-sonnet-20240229' also failed (Reason: {e_sonnet}).")
+                return ""
 
     prompt = f"""
     As a world-class penetration tester, I am testing for {vulnerability_type}.
@@ -6811,12 +6822,22 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies,
 
     # --- TASK PREPARATION ---
     tasks = []
-    discovered_urls, discovered_forms = await spider_target(base_url, output_handler, session_cookies=session_cookies)
+    # The spider_target function is now called only once at the beginning of the discovery phase.
+    # It will no longer be part of the looped attack_modules_to_run.
+    if spider_target in attack_modules_to_run:
+        discovered_urls, discovered_forms = await spider_target(base_url, output_handler, session_cookies=session_cookies)
+    else:
+        discovered_urls, discovered_forms = [], []
+
     all_url_targets = set(discovered_urls)
     for form in discovered_forms:
         all_url_targets.add(form['action'])
 
     for attack_func in attack_modules_to_run:
+        # Skip spider_target as it has already been run
+        if attack_func == spider_target:
+            continue
+
         # Target-level attacks run once
         if attack_func in [scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, check_http_smuggling, check_graphql_injection, scan_react2shell, scan_nmap, scan_nikto, scan_nuclei, profile_target]:
             args = (attack_func, base_url, None, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, None)
@@ -7012,23 +7033,17 @@ if __name__ == '__main__':
                 try:
                     # Modern way for newer library versions
                     genai.configure(api_key=gemini_api_key)
-                    GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
-                    print("  [INFO] Gemini API client configured successfully.")
-                except AttributeError:
-                    # Fallback for older library versions
-                    print("  [INFO] Older 'google-generativeai' version detected. Using environment variable fallback.")
-                    os.environ['GOOGLE_API_KEY'] = gemini_api_key
                     try:
                         GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
-                        print("  [INFO] Gemini API client configured successfully via fallback.")
-                    except AttributeError:
-                        print("\n" + "="*60)
-                        print("  [CRITICAL GEMINI ERROR] Incompatible 'google-generativeai' library version.")
-                        print("  Your library version is too old to use the 'gemini-1.5-flash' model.")
-                        print("  [ACTION] Please upgrade the library by running:")
-                        print("           pip install --upgrade google-generativeai")
-                        print("="*60 + "\n")
-                        GEMINI_MODEL = None # Set to None so the program can continue with Claude
+                        print("  [INFO] Gemini API client configured successfully with 'gemini-1.5-flash'.")
+                    except Exception as e_flash:
+                        print(f"  [AI WARNING] Could not initialize 'gemini-1.5-flash' (Reason: {e_flash}). Trying 'gemini-pro' as a fallback.")
+                        try:
+                            GEMINI_MODEL = genai.GenerativeModel('gemini-pro')
+                            print("  [INFO] Gemini API client configured successfully with fallback model 'gemini-pro'.")
+                        except Exception as e_pro:
+                            print(f"  [AI ERROR] Fallback model 'gemini-pro' also failed (Reason: {e_pro}). Disabling Gemini.")
+                            GEMINI_MODEL = None
                 except Exception as e:
                     print(f"  [ERROR] Failed to configure Gemini API: {e}")
                     GEMINI_MODEL = None
