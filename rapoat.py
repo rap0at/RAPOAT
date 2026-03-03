@@ -22,6 +22,9 @@ from playwright.async_api import async_playwright
 import html
 import configparser
 import google.genai as genai
+import sys
+print(f"DEBUG: Loaded google.genai from: {genai.__file__}") # 이 줄을 이렇게 수정해주세요
+print(f"DEBUG: google.genai has GenerativeModel: {'GenerativeModel' in dir(genai)}")
 import anthropic
 from colorama import Fore, Style # Added this line
 import urllib3
@@ -1177,6 +1180,28 @@ def get_encoded_payloads(payload):
         pass
     return list(encoded_payloads)
 
+def sanitize_filename(filename):
+    """파일 이름으로 사용할 수 없는 문자를 제거하거나 대체합니다."""
+    # Windows 및 Linux에서 일반적으로 허용되지 않는 문자
+    # 또한 URL에서 올 수 있는 ':'와 '/'도 처리
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    # 제어 문자 및 기타 비인쇄 문자 제거
+    sanitized = ''.join(char for char in sanitized if char.isprintable())
+    # 너무 길어지는 것을 방지 (일부 파일 시스템 제한)
+    return sanitized[:200]
+
+def save_output(output_dir, filename, content):
+    """주어진 내용을 지정된 디렉토리의 파일에 저장합니다."""
+    os.makedirs(output_dir, exist_ok=True)
+    filepath = os.path.join(output_dir, filename)
+    try:
+        with open(filepath, 'w', encoding='utf-8', errors='replace') as f:
+            f.write(content)
+    except Exception as e:
+        print(f"  [ERROR] Failed to save output to {filepath}: {e}")
+    
+    
+
 async def _send_async_http_request(url, method='GET', data=None, headers=None, cookies=None, timeout=10, verify_ssl=False, allow_redirects=True, output=None, session_cookies=None):
     """향상된 비동기 HTTP 요청 함수 (세션 쿠키, 쓰로틀링, 헤더 랜덤화)"""
     # 요청 간 랜덤 지연 (쓰로틀링)
@@ -1229,7 +1254,28 @@ async def _send_async_http_request(url, method='GET', data=None, headers=None, c
             async with session.request(method, url, data=data, headers=req_headers, timeout=timeout, allow_redirects=allow_redirects) as res:
                 response_details['status_code'] = res.status
                 response_details['headers'] = dict(res.headers)
-                response_details['text'] = await res.text()
+                
+                # 인코딩 처리 강화
+                decoded_text = ""
+                try:
+                    # Content-Type 헤더에서 charset 정보 추출
+                    content_type = res.headers.get('Content-Type', '').lower()
+                    charset_match = re.search(r'charset=([\w-]+)', content_type)
+                    detected_charset = charset_match.group(1) if charset_match else 'utf-8' # 기본값은 utf-8
+
+                    decoded_text = await res.text(encoding=detected_charset, errors='replace')
+                except Exception as e:
+                    # 특정 인코딩으로 디코딩 실패 시, 다른 인코딩 시도
+                    if output: output.print(f"    [WARNING] Failed to decode with {detected_charset}: {e}. Trying common fallbacks.")
+                    try:
+                        decoded_text = await res.text(encoding='latin-1', errors='replace')
+                    except Exception:
+                        try:
+                            decoded_text = await res.text(encoding='euc-kr', errors='replace')
+                        except Exception:
+                            decoded_text = await res.text(errors='ignore') # 최후의 수단
+
+                response_details['text'] = decoded_text
                 return res, request_details, response_details
     except asyncio.TimeoutError:
         error_msg = f"Request to {url} timed out."
@@ -1312,21 +1358,22 @@ async def spider_target(base_url, output, session_cookies=None):
     # 2. JS 렌더링 실패 시 또는 추가 수집을 위한 정적 분석 (Fallback)
     try:
         res, request_details, response_details = await _send_async_http_request(base_url, output=output, session_cookies=session_cookies)
-        if res:
-            soup = BeautifulSoup(await res.text(), 'html.parser')
+        if res and response_details['text']: # Ensure res is not None and text is available
+            html_content_static = response_details['text'] # Use the already decoded text
+            soup = BeautifulSoup(html_content_static, 'html.parser')
             for link in soup.find_all('a', href=True):
                 full_url = urljoin(base_url, link['href'])
                 if get_domain(full_url) == get_domain(base_url):
                      discovered_urls.add(full_url)
             
-            static_forms = _get_forms(await res.text(), base_url)
+            static_forms = _get_forms(html_content_static, base_url)
             for form in static_forms:
                 if form not in discovered_forms:
                     discovered_forms.append(form)
             
             # NEW: Regex for hidden URLs in JS/comments
             output.print("  [INFO] Searching for hidden URLs with regex in static content...")
-            regex_urls = re.findall(r'[\'"](/[^/][^\'"\s,]+|http[s]?://[^\'"\s,]+)[\'"]', await res.text())
+            regex_urls = re.findall(r'[\'"](/[^/][^\'"\s,]+|http[s]?://[^\'"\s,]+)[\'"]', html_content_static)
             for url in regex_urls:
                 full_url = urljoin(base_url, url)
                 if get_domain(full_url) == get_domain(base_url): # Stay on target domain
@@ -1394,7 +1441,10 @@ async def scan_nmap(target, output, tech, report, session_cookies=None):
         nmap_error = stderr.decode(errors='ignore')
         
         if process.returncode != 0:
-            output.print(f"  [ERROR] Nmap command failed with exit code {process.returncode}: {nmap_error}")
+            error_message = f"  [ERROR] Nmap command failed with exit code {process.returncode}."
+            if nmap_error:
+                error_message += f" Stderr: {nmap_error.strip()}"
+            output.print(error_message)
             return
 
         if "0 hosts up" in nmap_output:
@@ -1504,6 +1554,7 @@ async def scan_nuclei(target, output, tech, report, session_cookies=None):
     nuclei_command = [
         "nuclei", "-u", target_url, 
         "-t", "cves/,vulnerabilities/,technologies/,default-logins/,exposures/,misconfigurations/", 
+        "-etags", "google", # Exclude templates that require Google API keys
         "-silent", "-json"
     ]
     
@@ -6651,12 +6702,13 @@ async def run_attack_sequence(target, session_cookies, output_handler, ai_enable
 
     report = Report(target)
     tech = {'server': 'Unknown', 'backend': 'Unknown', 'framework': 'Unknown'}
+    base_url = normalize_target(target)
     
     if ai_enabled:
         output_handler.print("\n[AI MODE] AI assistance is enabled for this scan.")
 
     # Define all possible attack modules
-    discovery_modules = [profile_target, scan_nmap, scan_nikto, scan_nuclei, spider_target]
+    discovery_modules = [profile_target, scan_nmap, scan_nikto, scan_nuclei] # Spider is run separately
     exploit_modules = [
         scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, 
         check_http_smuggling, check_graphql_injection, scan_react2shell,
@@ -6672,12 +6724,19 @@ async def run_attack_sequence(target, session_cookies, output_handler, ai_enable
         'rce': [check_command_injection, check_insecure_deserialization]
     }
 
+    # --- Run Spider ONCE for all scan types to gather targets ---
+    output_handler.print("\n[+] Starting Discovery Spider to gather targets...")
+    discovered_urls, discovered_forms = await spider_target(base_url, output_handler, session_cookies=session_cookies)
+    all_url_targets = set(discovered_urls)
+    all_url_targets.add(base_url) # Always include the base URL for scanning
+    for form in discovered_forms:
+        all_url_targets.add(form['action'])
+    output_handler.print(f"[INFO] Spidering complete. Found {len(all_url_targets)} unique URLs/endpoints to test.")
+
+
     if scan_type == 'full':
         # --- PHASE 1: DISCOVERY (Primary) ---
-        output_handler.print("\n" + "="*50)
-        output_handler.print("  PHASE 1: DISCOVERY & PROFILING (PRIMARY MODULES)")
-        output_handler.print("="*50)
-        await run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, False, discovery_modules)
+        await run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, False, discovery_modules, list(all_url_targets), discovered_forms, "DISCOVERY & PROFILING")
         
         primary_report_filename = f"report_primary_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         report.write_to_file(primary_report_filename)
@@ -6693,12 +6752,9 @@ async def run_attack_sequence(target, session_cookies, output_handler, ai_enable
 
         if proceed == 'y':
             # --- PHASE 2: EXPLOITATION (Secondary) ---
-            output_handler.print("\n" + "="*50)
-            output_handler.print("  PHASE 2: EXPLOITATION (SECONDARY MODULES)")
-            output_handler.print("="*50)
             # Enable AI reordering for the exploit phase if AI is on
             ai_should_reorder = True if ai_enabled else False
-            await run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, ai_should_reorder, exploit_modules)
+            await run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, ai_should_reorder, exploit_modules, list(all_url_targets), discovered_forms, "EXPLOITATION")
             
             final_report_filename = f"report_final_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
             ai_content = ""
@@ -6716,10 +6772,8 @@ async def run_attack_sequence(target, session_cookies, output_handler, ai_enable
             output_handler.print(f"[ERROR] Invalid scan type '{scan_type}' selected.")
             return
             
-        output_handler.print("\n" + "="*50)
-        output_handler.print(f"  RUNNING SPECIFIC SCAN: {scan_type.upper()}")
-        output_handler.print("="*50)
-        await run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, False, modules_to_run)
+        phase_title = f"SPECIFIC SCAN: {scan_type.upper()}"
+        await run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, False, modules_to_run, list(all_url_targets), discovered_forms, phase_title)
         
         report_filename = f"report_{scan_type}_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         ai_content = ""
@@ -6732,7 +6786,7 @@ async def run_attack_sequence(target, session_cookies, output_handler, ai_enable
 
 def _run_single_attack(args):
     """Helper function to run a single attack; designed to be called by ThreadPoolExecutor."""
-    attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, nmap_output_file_path = args # Added nmap_output_file_path
+    attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms = args
     check_name = f"{attack_func.__name__} on {url.split('/')[-1][:30]}"
     loop = None
     try:
@@ -6764,8 +6818,6 @@ def _run_single_attack(args):
             kwargs['discovered_urls'] = discovered_urls
         if 'discovered_forms' in sig.parameters:
             kwargs['discovered_forms'] = discovered_forms
-        if 'nmap_output_file' in sig.parameters: # New: Pass nmap_output_file to scan_exposed_services
-            kwargs['nmap_output_file'] = nmap_output_file_path
             
         # Handle discovery modules that use base_url
         if attack_func in [spider_target, profile_target, scan_nmap, scan_nikto, scan_nuclei, scan_and_exploit_mongodb, scan_rtsp]:
@@ -6784,7 +6836,7 @@ def _run_single_attack(args):
         if loop:
             loop.close()
 
-async def run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, ai_reorder_attacks, attack_modules_to_run):
+async def run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, ai_reorder_attacks, attack_modules_to_run, all_url_targets, discovered_forms, phase_name):
     base_url = normalize_target(target)
     config = configparser.ConfigParser()
     
@@ -6805,8 +6857,7 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies,
         try:
             # This part needs the results from the discovery phase. 
             # We assume discovery results are already in the report object from a previous phase.
-            discovered_urls, discovered_forms = [], [] # Placeholder, should be passed if needed
-            recommended_attack_names = await ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_forms, output_handler)
+            recommended_attack_names = await ai_analyze_scan_results(base_url, tech, report, list(all_url_targets), discovered_forms, output_handler)
             
             if recommended_attack_names:
                 output_handler.print(f"\n[AI MODE] Reordering attacks based on AI recommendations: {', '.join(recommended_attack_names)}")
@@ -6822,31 +6873,22 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies,
 
     # --- TASK PREPARATION ---
     tasks = []
-    # The spider_target function is now called only once at the beginning of the discovery phase.
-    # It will no longer be part of the looped attack_modules_to_run.
-    if spider_target in attack_modules_to_run:
-        discovered_urls, discovered_forms = await spider_target(base_url, output_handler, session_cookies=session_cookies)
-    else:
-        discovered_urls, discovered_forms = [], []
-
-    all_url_targets = set(discovered_urls)
-    for form in discovered_forms:
-        all_url_targets.add(form['action'])
+    # The spider is now run outside this function. We receive the URLs/forms directly.
 
     for attack_func in attack_modules_to_run:
-        # Skip spider_target as it has already been run
+        # Skip spider_target as it's handled externally
         if attack_func == spider_target:
             continue
 
         # Target-level attacks run once
         if attack_func in [scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, check_http_smuggling, check_graphql_injection, scan_react2shell, scan_nmap, scan_nikto, scan_nuclei, profile_target]:
-            args = (attack_func, base_url, None, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, None)
+            args = (attack_func, base_url, None, base_url, output_handler, tech, report, session_cookies, ai_enabled, list(all_url_targets), discovered_forms)
             tasks.append(args)
         # URL-level attacks run for each discovered URL/form
         else:
             for url in all_url_targets:
                 form_to_test = next((f for f in discovered_forms if f['action'] == url), None)
-                args = (attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, None)
+                args = (attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, list(all_url_targets), discovered_forms)
                 tasks.append(args)
 
     # --- TASK EXECUTION ---
@@ -6854,7 +6896,6 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies,
         output_handler.print(f"  [INFO] No attack tasks to execute for this phase.")
         return
 
-    phase_name = "ATTACK PHASE" # Generic phase name
     output_handler.print("\n" + "="*50)
     output_handler.print(f"  {phase_name} (Running with {num_threads} threads)")
     output_handler.print("="*50)
