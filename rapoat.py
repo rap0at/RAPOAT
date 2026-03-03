@@ -7031,8 +7031,16 @@ if __name__ == '__main__':
             # Configure available AI clients
             if gemini_api_key:
                 try:
-                    # Modern way for newer library versions
-                    genai.configure(api_key=gemini_api_key)
+                    # Try to use the modern configure method
+                    try:
+                        genai.configure(api_key=gemini_api_key)
+                        print("  [INFO] Gemini API configured using genai.configure().")
+                    except AttributeError:
+                        # Fallback for older library versions that don't have genai.configure()
+                        print("  [INFO] 'genai.configure()' not found. Falling back to environment variable for Gemini API key.")
+                        os.environ['GOOGLE_API_KEY'] = gemini_api_key
+                    
+                    # Now proceed with model initialization (gemini-1.5-flash then gemini-pro fallback)
                     try:
                         GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
                         print("  [INFO] Gemini API client configured successfully with 'gemini-1.5-flash'.")
@@ -7044,7 +7052,7 @@ if __name__ == '__main__':
                         except Exception as e_pro:
                             print(f"  [AI ERROR] Fallback model 'gemini-pro' also failed (Reason: {e_pro}). Disabling Gemini.")
                             GEMINI_MODEL = None
-                except Exception as e:
+                except Exception as e: # Catch any other unexpected errors during the whole process
                     print(f"  [ERROR] Failed to configure Gemini API: {e}")
                     GEMINI_MODEL = None
             
