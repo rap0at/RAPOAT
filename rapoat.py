@@ -18,15 +18,11 @@ import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests_html import HTMLSession
-from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright
 import html
 import configparser
 import google.genai as genai
-import sys
-print(f"DEBUG: Loaded google.genai from: {genai.__file__}") # 이 줄을 이렇게 수정해주세요
-print(f"DEBUG: google.genai has GenerativeModel: {'GenerativeModel' in dir(genai)}")
 import anthropic
-from colorama import Fore, Style # Added this line
 import urllib3
 import aiohttp
 import asyncio
@@ -48,6 +44,10 @@ attack_status = "idle"
 # NEW: Gemini AI Configuration
 GEMINI_API_KEY = None
 GEMINI_MODEL = None
+
+# NEW: Claude AI Configuration
+CLAUDE_API_KEY = None
+CLAUDE_MODEL = None
 
 # =================================================================================
 # 2. 웹 UI (v5.5 Ultimate Pro Max)
@@ -1168,6 +1168,10 @@ def get_domain(target):
 def get_random_string(length=8):
     return ''.join(random.choice(string.ascii_lowercase) for i in range(length))
 
+def sanitize_filename(filename):
+    """Removes characters from a string that are not allowed in filenames."""
+    return re.sub(r'[^\w\.-]', '_', filename)
+
 def get_encoded_payloads(payload):
     """다양한 인코딩으로 페이로드 목록 생성"""
     encoded_payloads = {payload}
@@ -1179,28 +1183,6 @@ def get_encoded_payloads(payload):
     except Exception:
         pass
     return list(encoded_payloads)
-
-def sanitize_filename(filename):
-    """파일 이름으로 사용할 수 없는 문자를 제거하거나 대체합니다."""
-    # Windows 및 Linux에서 일반적으로 허용되지 않는 문자
-    # 또한 URL에서 올 수 있는 ':'와 '/'도 처리
-    sanitized = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    # 제어 문자 및 기타 비인쇄 문자 제거
-    sanitized = ''.join(char for char in sanitized if char.isprintable())
-    # 너무 길어지는 것을 방지 (일부 파일 시스템 제한)
-    return sanitized[:200]
-
-def save_output(output_dir, filename, content):
-    """주어진 내용을 지정된 디렉토리의 파일에 저장합니다."""
-    os.makedirs(output_dir, exist_ok=True)
-    filepath = os.path.join(output_dir, filename)
-    try:
-        with open(filepath, 'w', encoding='utf-8', errors='replace') as f:
-            f.write(content)
-    except Exception as e:
-        print(f"  [ERROR] Failed to save output to {filepath}: {e}")
-    
-    
 
 async def _send_async_http_request(url, method='GET', data=None, headers=None, cookies=None, timeout=10, verify_ssl=False, allow_redirects=True, output=None, session_cookies=None):
     """향상된 비동기 HTTP 요청 함수 (세션 쿠키, 쓰로틀링, 헤더 랜덤화)"""
@@ -1254,28 +1236,7 @@ async def _send_async_http_request(url, method='GET', data=None, headers=None, c
             async with session.request(method, url, data=data, headers=req_headers, timeout=timeout, allow_redirects=allow_redirects) as res:
                 response_details['status_code'] = res.status
                 response_details['headers'] = dict(res.headers)
-                
-                # 인코딩 처리 강화
-                decoded_text = ""
-                try:
-                    # Content-Type 헤더에서 charset 정보 추출
-                    content_type = res.headers.get('Content-Type', '').lower()
-                    charset_match = re.search(r'charset=([\w-]+)', content_type)
-                    detected_charset = charset_match.group(1) if charset_match else 'utf-8' # 기본값은 utf-8
-
-                    decoded_text = await res.text(encoding=detected_charset, errors='replace')
-                except Exception as e:
-                    # 특정 인코딩으로 디코딩 실패 시, 다른 인코딩 시도
-                    if output: output.print(f"    [WARNING] Failed to decode with {detected_charset}: {e}. Trying common fallbacks.")
-                    try:
-                        decoded_text = await res.text(encoding='latin-1', errors='replace')
-                    except Exception:
-                        try:
-                            decoded_text = await res.text(encoding='euc-kr', errors='replace')
-                        except Exception:
-                            decoded_text = await res.text(errors='ignore') # 최후의 수단
-
-                response_details['text'] = decoded_text
+                response_details['text'] = await res.text()
                 return res, request_details, response_details
     except asyncio.TimeoutError:
         error_msg = f"Request to {url} timed out."
@@ -1322,7 +1283,7 @@ async def spider_target(base_url, output, session_cookies=None):
 
     # 1. JS 렌더링을 통한 수집 (Playwright)
     try:
-        async with async_playwright() as p:
+        with sync_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             context = await browser.new_context(ignore_https_errors=True)
             if session_cookies:
@@ -1358,22 +1319,21 @@ async def spider_target(base_url, output, session_cookies=None):
     # 2. JS 렌더링 실패 시 또는 추가 수집을 위한 정적 분석 (Fallback)
     try:
         res, request_details, response_details = await _send_async_http_request(base_url, output=output, session_cookies=session_cookies)
-        if res and response_details['text']: # Ensure res is not None and text is available
-            html_content_static = response_details['text'] # Use the already decoded text
-            soup = BeautifulSoup(html_content_static, 'html.parser')
+        if res:
+            soup = BeautifulSoup(await res.text(), 'html.parser')
             for link in soup.find_all('a', href=True):
                 full_url = urljoin(base_url, link['href'])
                 if get_domain(full_url) == get_domain(base_url):
                      discovered_urls.add(full_url)
             
-            static_forms = _get_forms(html_content_static, base_url)
+            static_forms = _get_forms(await res.text(), base_url)
             for form in static_forms:
                 if form not in discovered_forms:
                     discovered_forms.append(form)
             
             # NEW: Regex for hidden URLs in JS/comments
             output.print("  [INFO] Searching for hidden URLs with regex in static content...")
-            regex_urls = re.findall(r'[\'"](/[^/][^\'"\s,]+|http[s]?://[^\'"\s,]+)[\'"]', html_content_static)
+            regex_urls = re.findall(r'[\'"](/[^/][^\'"\s,]+|http[s]?://[^\'"\s,]+)[\'"]', await res.text())
             for url in regex_urls:
                 full_url = urljoin(base_url, url)
                 if get_domain(full_url) == get_domain(base_url): # Stay on target domain
@@ -1422,11 +1382,16 @@ async def spider_target(base_url, output, session_cookies=None):
 async def scan_nmap(target, output, tech, report, session_cookies=None):
     output.print(f"\n[+] Starting Nmap Scan on {target}...")
     domain = get_domain(normalize_target(target))
+    
+    output_dir = os.path.join(os.getcwd(), f"scan_{sanitize_filename(domain)}_{time.strftime('%Y%m%d_%H%M%S')}")
+    os.makedirs(output_dir, exist_ok=True)
+    nmap_output_file = os.path.join(output_dir, "nmap_scan.txt")
+
     try:
         target_ip = socket.gethostbyname(domain)
     except socket.gaierror:
         output.print(f"  [ERROR] Could not resolve hostname for {domain}. Skipping Nmap scan.")
-        return
+        return None
 
     nmap_command = ["nmap", "-sV", "-O", "-p-", "--script", "vuln", target_ip]
     
@@ -1440,16 +1405,19 @@ async def scan_nmap(target, output, tech, report, session_cookies=None):
         nmap_output = stdout.decode(errors='ignore')
         nmap_error = stderr.decode(errors='ignore')
         
-        if process.returncode != 0:
-            error_message = f"  [ERROR] Nmap command failed with exit code {process.returncode}."
+        with open(nmap_output_file, 'w', encoding='utf-8') as f:
+            f.write(nmap_output)
             if nmap_error:
-                error_message += f" Stderr: {nmap_error.strip()}"
-            output.print(error_message)
-            return
+                f.write("\n--- STDERR ---\n")
+                f.write(nmap_error)
+
+        if process.returncode != 0:
+            output.print(f"  [ERROR] Nmap command failed with exit code {process.returncode}: {nmap_error}")
+            return nmap_output_file
 
         if "0 hosts up" in nmap_output:
             output.print("  [INFO] Nmap reported '0 hosts up', indicating the target may be down or blocking scans.")
-            return
+            return nmap_output_file
 
         open_ports = re.findall(r"(\d+)/tcp\s+open\s+(\S+)\s+(.*)", nmap_output)
         os_match = re.search(r"OS details: ([^\n]+)|Running: ([^\n]+)", nmap_output)
@@ -1472,13 +1440,18 @@ async def scan_nmap(target, output, tech, report, session_cookies=None):
                                        f"Nmap detected port {port} running {service} version {version}.")
         else:
             output.print("  [INFO] No open ports detected by Nmap.")
+        
+        return nmap_output_file
             
     except asyncio.TimeoutError:
         output.print(f"  [ERROR] Nmap command timed out after 30 minutes.")
+        return None
     except FileNotFoundError:
         output.print(f"  [ERROR] Nmap not found. Please ensure Nmap is installed and in your PATH.")
+        return None
     except Exception as e:
         output.print(f"  [ERROR] An unexpected error occurred during Nmap scan: {e}")
+        return None
 
 # --- 신규 공격 모듈들 ---
 async def scan_nikto(target, output, tech, report, session_cookies=None):
@@ -1554,7 +1527,6 @@ async def scan_nuclei(target, output, tech, report, session_cookies=None):
     nuclei_command = [
         "nuclei", "-u", target_url, 
         "-t", "cves/,vulnerabilities/,technologies/,default-logins/,exposures/,misconfigurations/", 
-        "-etags", "google", # Exclude templates that require Google API keys
         "-silent", "-json"
     ]
     
@@ -4054,416 +4026,92 @@ async def check_ldap_injection(target, form_to_test, output, tech, report, sessi
                 return True
         return False
 
-    # --- New functions for scan_exposed_services module ---
+        async def _ftp_anonymous_login(target, port, output_dir, report):
+            """Async helper to check for anonymous FTP login."""
+            output.print(f"    [*] Attempting anonymous FTP login on {target}:{port}")
+            try:
+                reader, writer = await asyncio.wait_for(asyncio.open_connection(target, port), timeout=5)
+                writer.write(b"USER anonymous\r\n")
+                await writer.drain()
+                await reader.read(1024)
+                writer.write(b"PASS anonymous\r\n")
+                await writer.drain()
+                res_pass = await reader.read(1024)
+                if b"230" in res_pass:
+                    output.print(f"      [HIGH] Anonymous FTP login successful on {target}:{port}.")
+                    report.add_finding("Anonymous FTP Access", "High", f"{target}:{port}", "FTP Login", "anonymous:anonymous", "Anonymous FTP access is enabled, potentially exposing files.", "Disable anonymous FTP access if not required.", f"Response: {res_pass.decode(errors='ignore')}")
+                writer.close()
+                await writer.wait_closed()
+            except Exception as e:
+                output.print(f"      [ERROR] FTP check on {target}:{port} failed: {e}")
+async def _smb_anonymous_share(target, port, output_dir, report):
+    """Async helper to check for anonymous SMB shares."""
+    output.print(f"    [*] Checking for anonymous SMB shares on {target}:{port}")
+    try:
+        proc = await asyncio.create_subprocess_exec('smbclient', '-L', f'//{target}', '-N', '-p', str(port), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        smb_output = stdout.decode(errors='ignore')
+        if proc.returncode == 0 and "Disk" in smb_output:
+            output.print(f"      [HIGH] Anonymous SMB share listing successful on {target}:{port}.")
+            report.add_finding("Anonymous SMB Share Listing", "High", f"{target}:{port}", "SMB", "Anonymous", "SMB server allows anonymous listing of shares.", "Disable anonymous access to SMB shares.", f"smbclient output:\n{smb_output}")
+    except FileNotFoundError:
+        output.print("      [WARNING] `smbclient` not found. Skipping SMB check.")
+    except Exception as e:
+        output.print(f"      [ERROR] SMB check on {target}:{port} failed: {e}")
 
-        async def ai_assist_exposed_services(target, output_dir, findings):
+async def scan_exposed_services(target, output, tech, report, session_cookies=None, nmap_output_file=None):
+    """
+    Parses an Nmap output file and runs specific checks on discovered open services.
+    This function is now fully asynchronous.
+    """
+    output.print(f"\n[+] Starting Exposed Services Scan based on Nmap results for {target}...")
 
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing exposed services findings for {target}...{Style.RESET_ALL}")
+    if not nmap_output_file or not os.path.exists(nmap_output_file):
+        output.print(f"  [WARNING] Nmap output file not found at '{nmap_output_file}'. Cannot perform exposed services scan.")
+        report.add_check("Exposed Services Scan", "Skipped (Nmap file not found)")
+        return
 
-            prompt = f"Analyze the following exposed services scan findings for target {target} and provide a summary of critical vulnerabilities, potential impact, and recommended next steps. Also, suggest any further advanced exploitation techniques based on these findings.\n\nFindings:\n"
+    try:
+        with open(nmap_output_file, 'r') as f:
+            nmap_content = f.read()
 
-            for finding in findings:
+        service_pattern = re.compile(r"(\d+)/(tcp|udp)\s+open\s+(\S+)")
+        services_to_attack = []
+        for line in nmap_content.splitlines():
+            match = service_pattern.search(line)
+            if match:
+                port = int(match.group(1))
+                protocol = match.group(2)
+                service = match.group(3).lower()
+                services_to_attack.append({'port': port, 'protocol': protocol, 'service': service})
 
-                prompt += f"- {finding}\n"
+        if not services_to_attack:
+            output.print("  [INFO] No relevant open services found in Nmap output for exposed services scan.")
+            report.add_check("Exposed Services Scan", "Completed (No open services)")
+            return
 
+        output_dir = os.path.dirname(nmap_output_file)
+        tasks = []
+
+        for service_info in services_to_attack:
+            port = service_info['port']
+            service_name = service_info['service']
             
+            if 'ftp' in service_name:
+                tasks.append(_ftp_anonymous_login(target, port, output_dir, report))
+            elif 'netbios-ssn' in service_name or 'microsoft-ds' in service_name:
+                tasks.append(_smb_anonymous_share(target, port, output_dir, report))
+            # Add other async service checks here as needed, e.g., for SSH, Telnet, SMTP.
+            # For now, focusing on fixing the existing logic for FTP and SMB.
 
-            try:
+        if tasks:
+            await asyncio.gather(*tasks)
 
-                response = await GEMINI_MODEL.generate_content_async(prompt)
+    except Exception as e:
+        output.print(f"  [ERROR] An error occurred during exposed services scan: {e}")
+        report.add_check("Exposed Services Scan", f"Error: {e}")
 
-                ai_response = response.text
-
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Exposed Services:\n{ai_response}{Style.RESET_ALL}")
-
-                save_output(output_dir, "ai_exposed_services_analysis.txt", ai_response)
-
-                return ai_response
-
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for Exposed Services: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_profile_target(target, output_dir, tech_info):
-
-                        print(f"{Fore.CYAN}[*] AI Assistant analyzing technology profile for {target}...{Style.RESET_ALL}")
-
-                        prompt = f"Analyze the following technology profile for target {target} and provide a summary of potential security implications, common vulnerabilities associated with these technologies, and recommended next steps for further investigation.\n\nTechnology Profile:\n"
-
-                        for key, value in tech_info.items():
-
-                            prompt += f"- {key}: {value}\n"
-
-                        
-
-                        try:
-
-                            response = await GEMINI_MODEL.generate_content_async(prompt)
-
-                            ai_response = response.text
-
-                            print(f"{Fore.GREEN}[+] AI Assistant Analysis for Technology Profile:\n{ai_response}{Style.RESET_ALL}")
-
-                            save_output(output_dir, "ai_profile_target_analysis.txt", ai_response)
-
-                            return ai_response
-
-                        except Exception as e:
-
-                            print(f"{Fore.RED}[-] AI Assistant Error for Technology Profile: {e}{Style.RESET_ALL}")
-
-                            return f"AI Assistant Error: {e}"
-
-        async def ai_assist_nmap(target, output_dir, nmap_output_file):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing Nmap scan results for {target}...{Style.RESET_ALL}")
-            try:
-                with open(nmap_output_file, 'r') as f:
-                    nmap_content = f.read()
-                
-                prompt = f"Analyze the following Nmap scan results for target {target}. Identify open ports, services, and versions. Highlight any potentially vulnerable services or unusual configurations. Suggest immediate next steps for exploiting or further investigating these findings.\n\nNmap Scan Results:\n{nmap_content}"
-                
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Nmap Scan:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_nmap_analysis.txt", ai_response)
-                return ai_response
-            except FileNotFoundError:
-                print(f"{Fore.RED}[-] Nmap output file not found for AI analysis: {nmap_output_file}{Style.RESET_ALL}")
-                return "Nmap output file not found for AI analysis."
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for Nmap Scan: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_nikto(target, output_dir, nikto_output_file):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing Nikto scan results for {target}...{Style.RESET_ALL}")
-            try:
-                with open(nikto_output_file, 'r') as f:
-                    nikto_content = f.read()
-                
-                prompt = f"Analyze the following Nikto scan results for target {target}. Summarize identified vulnerabilities, misconfigurations, and informational findings. Prioritize the most critical issues and suggest specific exploitation techniques or remediation actions.\n\nNikto Scan Results:\n{nikto_content}"
-                
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Nikto Scan:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_nikto_analysis.txt", ai_response)
-                return ai_response
-            except FileNotFoundError:
-                print(f"{Fore.RED}[-] Nikto output file not found for AI analysis: {nikto_output_file}{Style.RESET_ALL}")
-                return "Nikto output file not found for AI analysis."
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for Nikto Scan: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_nuclei(target, output_dir, nuclei_output_file):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing Nuclei scan results for {target}...{Style.RESET_ALL}")
-            try:
-                with open(nuclei_output_file, 'r') as f:
-                    nuclei_content = f.read()
-                
-                prompt = f"Analyze the following Nuclei scan results for target {target}. List all identified vulnerabilities and their severity. For each vulnerability, provide a brief explanation and suggest immediate remediation steps or further exploitation paths.\n\nNuclei Scan Results:\n{nuclei_content}"
-                
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Nuclei Scan:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_nuclei_analysis.txt", ai_response)
-                return ai_response
-            except FileNotFoundError:
-                print(f"{Fore.RED}[-] Nuclei output file not found for AI analysis: {nuclei_output_file}{Style.RESET_ALL}")
-                return "Nuclei output file not found for AI analysis."
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for Nuclei Scan: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_spider(target, output_dir, discovered_urls, discovered_forms):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing spidering results for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following discovered URLs and forms for target {target}. Identify any interesting endpoints, hidden parameters, or unusual form structures that might indicate potential vulnerabilities (e.g., IDOR, XSS, SQLi, LFI). Suggest specific URLs or forms to prioritize for further attack.\n\nDiscovered URLs ({len(discovered_urls)}):\n"
-            for url in discovered_urls[:20]: # Limit for prompt size
-                prompt += f"- {url}\n"
-            if len(discovered_urls) > 20:
-                prompt += f"- ...and {len(discovered_urls) - 20} more.\n"
-            
-            prompt += f"\nDiscovered Forms ({len(discovered_forms)}):\n"
-            for form in discovered_forms[:10]: # Limit for prompt size
-                prompt += f"- Action: {form.get('action', 'N/A')}, Method: {form.get('method', 'N/A')}, Inputs: {[i.get('name', 'N/A') for i in form.get('inputs', [])]}\n"
-            if len(discovered_forms) > 10:
-                prompt += f"- ...and {len(discovered_forms) - 10} more.\n"
-    
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Spidering Results:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_spider_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for Spidering Results: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_mongodb(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing MongoDB findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following MongoDB scan/exploit findings for target {target}. Summarize any vulnerabilities, misconfigurations, or sensitive data exposures. Suggest immediate next steps for exploitation or remediation.\n\nMongoDB Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for MongoDB:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_mongodb_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for MongoDB: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_rtsp(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing RTSP findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following RTSP scan findings for target {target}. Identify any open streams, authentication issues, or potential vulnerabilities. Suggest next steps for exploitation or securing the RTSP service.\n\nRTSP Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for RTSP:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_rtsp_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for RTSP: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_insecure_deserialization(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing Insecure Deserialization findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following Insecure Deserialization findings for target {target}. Summarize the type of deserialization vulnerability (Java, PHP, Python) and its potential for Remote Code Execution. Suggest specific payloads or techniques for further exploitation, and remediation advice.\n\nInsecure Deserialization Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Insecure Deserialization:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_insecure_deserialization_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for Insecure Deserialization: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_graphql_injection(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing GraphQL Injection findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following GraphQL Injection findings for target {target}. Summarize any schema disclosures, introspection vulnerabilities, or batching issues. Suggest specific GraphQL queries for further exploitation or remediation steps.\n\nGraphQL Injection Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for GraphQL Injection:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_graphql_injection_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for GraphQL Injection: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_cors(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing CORS findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following CORS misconfiguration findings for target {target}. Explain the potential impact (e.g., data theft, credential exposure) and suggest remediation steps. If applicable, provide a proof-of-concept for exploitation.\n\nCORS Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for CORS:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_cors_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for CORS: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_crlf(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing CRLF Injection findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following CRLF Injection findings for target {target}. Explain the potential impact (e.g., HTTP Response Splitting, XSS) and suggest remediation steps. If applicable, provide a proof-of-concept for exploitation.\n\nCRLF Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for CRLF Injection:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_crlf_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for CRLF Injection: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_open_redirect(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing Open Redirect findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following Open Redirect findings for target {target}. Explain the potential impact (e.g., phishing, malware distribution) and suggest remediation steps. Provide a proof-of-concept for exploitation.\n\nOpen Redirect Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Open Redirect:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_open_redirect_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for Open Redirect: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_ssrf(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing SSRF findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following SSRF findings for target {target}. Explain the potential impact (e.g., internal network access, cloud metadata exposure) and suggest remediation steps. Provide specific internal URLs or payloads for further exploitation.\n\nSSRF Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for SSRF:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_ssrf_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for SSRF: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_react2shell(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing React2Shell findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following React2Shell findings for target {target}. Explain the potential for Remote Code Execution (RCE) and suggest remediation steps. Provide specific payloads or techniques for further exploitation.\n\nReact2Shell Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for React2Shell:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_react2shell_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for React2Shell: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_xxe(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing XXE findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following XXE (XML External Entity) findings for target {target}. Explain the potential impact (e.g., local file disclosure, SSRF, RCE) and suggest remediation steps. Provide specific XXE payloads for further exploitation.\n\nXXE Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for XXE:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_xxe_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for XXE: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_csrf(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing CSRF findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following CSRF (Cross-Site Request Forgery) findings for target {target}. Explain the potential impact (e.g., unauthorized actions, account takeover) and suggest remediation steps. Provide a proof-of-concept for exploitation.\n\nCSRF Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for CSRF:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_csrf_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for CSRF: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_file_inclusion(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing File Inclusion findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following File Inclusion (LFI/RFI) findings for target {target}. Explain the potential impact (e.g., sensitive file disclosure, RCE) and suggest remediation steps. Provide specific payloads or techniques for further exploitation.\n\nFile Inclusion Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for File Inclusion:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_file_inclusion_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for File Inclusion: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-        async def ai_assist_brute_force_login(target, output_dir, findings):
-            print(f"{Fore.CYAN}[*] AI Assistant analyzing Brute Force Login findings for {target}...{Style.RESET_ALL}")
-            prompt = f"Analyze the following Brute Force Login findings for target {target}. Summarize any successful credential compromises or weak login mechanisms. Suggest remediation steps (e.g., rate limiting, CAPTCHA, MFA) and further exploitation paths.\n\nBrute Force Login Findings:\n"
-            for finding in findings:
-                prompt += f"- {finding}\n"
-            try:
-                response = await GEMINI_MODEL.generate_content_async(prompt)
-                ai_response = response.text
-                print(f"{Fore.GREEN}[+] AI Assistant Analysis for Brute Force Login:\n{ai_response}{Style.RESET_ALL}")
-                save_output(output_dir, "ai_brute_force_login_analysis.txt", ai_response)
-                return ai_response
-            except Exception as e:
-                print(f"{Fore.RED}[-] AI Assistant Error for Brute Force Login: {e}{Style.RESET_ALL}")
-                return f"AI Assistant Error: {e}"
-
-    async def run_smart_probe(point):
-        output.print(f"  [Phase 1] Running Smart Probe for LDAP Injection on param '{point['param']}'...")
-        for payload in ldap_probes:
-            if await test_single_ldap_payload(point, payload, output, session_cookies):
-                return True
-        return False
-
-    async def run_ai_bypass(point):
-        output.print(f"  [Phase 2] Running AI-Assisted Bypass for LDAP Injection on param '{point['param']}'...")
-        probe_payload = "*)(cn=*"
-        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
-        res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
-        response_snippet = (await res.text())[:500] if res and await res.text() else "No response from server."
-
-        ai_payloads = await ai_generate_dynamic_payloads("LDAP Injection", probe_payload, response_snippet, output)
-        for payload in ai_payloads:
-            if await test_single_ldap_payload(point, payload, output, session_cookies):
-                return True
-        return False
-
-    async def run_full_scan(point):
-        output.print(f"  [Phase 3] Smart probes failed. Starting Full Brute-Force Scan for LDAP Injection on param '{point['param']}'...")
-        for payload in ldap_payloads:
-            if await test_single_ldap_payload(point, payload, output, session_cookies):
-                return True
-        return False
-
-    # --- Main Orchestration Logic ---
-    attack_points = []
-    parsed_target = urlparse(target)
-    base_url_without_query = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
-
-    if parsed_target.query:
-        params = unquote(parsed_target.query).split('&')
-        for p_str in params:
-            if '=' not in p_str: continue
-            param_name, value = p_str.split('=', 1)
-            attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': parsed_target.query})
-
-    if form_to_test:
-        action_url = urljoin(target, form_to_test['action'])
-        form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
-        for input_field in form_to_test['inputs']:
-            if input_field['type'] in ['submit', 'hidden']: continue
-            param_name = input_field['name']
-            original_value = input_field.get('value', 'test')
-            attack_points.append({'url': action_url, 'method': form_to_test['method'], 'param': param_name, 'value': original_value, 'form_data': form_data, 'original_query': None})
-
-    if not attack_points:
-        ldap_params = [p for p in COMMON_PARAM_NAMES if any(k in p for k in ['user', 'uid', 'name', 'search', 'filter', 'query', 'dn'])]
-        for param_name in ldap_params[:50]:
-            attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': 'test', 'form_data': None, 'original_query': None})
-
-    for point in attack_points:
-        output.print(f"  [*] Testing LDAP Injection on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
-        vulnerability_found = await run_smart_probe(point)
-        if vulnerability_found:
-            continue
-
-        if ai_enabled:
-            vulnerability_found = await run_ai_bypass(point)
-            if vulnerability_found:
-                continue
-        
-        vulnerability_found = await run_full_scan(point)
-        if vulnerability_found:
-            continue
-            
-        report.add_check(f"LDAP Injection on param '{point['param']}' at {point['url']}", "No vulnerability found")
-
-    output.print("  [INFO] LDAP Injection scan completed.")
+    output.print(f"[+] Exposed Services Scan for {target} Finished.")
 
 
 # --- 10. React2Shell ---
@@ -6427,88 +6075,107 @@ async def check_csrf(target, form_to_test, output, tech, report, session_cookies
 # =================================================================================
 async def ai_generate_dynamic_payloads(vulnerability_type, base_payload, response_snippet, output):
     """
-    Generates dynamic payloads using Gemini & Claude AI in parallel based on the server's response.
+    Generates dynamic payloads using Gemini and/or Claude AI based on the server's response.
     """
     if not GEMINI_MODEL and not CLAUDE_MODEL:
         output.print("  [AI WARNING] No AI models initialized. Cannot generate dynamic payloads.")
         return []
 
-    output.print(f"  [AI MODE] Analyzing response for {vulnerability_type} to generate bypass payloads using available AIs...")
+    output.print(f"  [AI MODE] Analyzing response for {vulnerability_type} to generate bypass payloads...")
     
-    async def call_gemini(prompt):
-        try:
-            response = await GEMINI_MODEL.generate_content_async(prompt)
-            return response.text
-        except Exception as e:
-            output.print(f"  [AI ERROR - Gemini] Failed to generate payloads: {e}")
-            return ""
-
-    async def call_claude(prompt):
-        try:
-            # Anthropic's API format is different
-            message = CLAUDE_MODEL.messages.create(
-                model="claude-3-haiku-20240307",
-                max_tokens=1024,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            return message.content[0].text
-        except Exception as e_haiku:
-            output.print(f"  [AI WARNING - Claude] Could not use primary model 'claude-3-haiku-20240307' (Reason: {e_haiku}). Trying fallback 'claude-3-sonnet-20240229'.")
-            # If Haiku fails, try fallback model (Sonnet)
-            try:
-                message = CLAUDE_MODEL.messages.create(
-                    model="claude-3-sonnet-20240229",
-                    max_tokens=1024,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return message.content[0].text
-            except Exception as e_sonnet:
-                output.print(f"  [AI ERROR - Claude] Fallback model 'claude-3-sonnet-20240229' also failed (Reason: {e_sonnet}).")
-                return ""
-
-    prompt = f"""
-    As a world-class penetration tester, I am testing for {vulnerability_type}.
-    My initial payload was: `{base_payload}`
-    The server returned this response snippet (might be HTML, an error, or a WAF block page):
-    --- RESPONSE SNIPPET ---
-    {response_snippet}
-    --- END OF SNIPPET ---
-    This response suggests my payload was blocked or ineffective. Please analyze the response and the initial payload.
-    Based on your analysis, provide a list of 5-10 creative, alternative payloads designed to bypass the detected protection.
-    Focus on obfuscation, alternative syntax, encoding, or other bypass techniques relevant to {vulnerability_type}.
-    
-    IMPORTANT: Provide only the raw payloads, each on a new line. Do not add any explanations, comments, or formatting like bullet points or numbering.
-    """
-
     tasks = []
+    
+    # Create task for Gemini if available
     if GEMINI_MODEL:
-        tasks.append(call_gemini(prompt))
-    if CLAUDE_MODEL:
-        tasks.append(call_claude(prompt))
-
-    ai_responses = await asyncio.gather(*tasks)
-    
-    all_payloads = []
-    for response_text in ai_responses:
-        if response_text:
-            payloads = [p.strip() for p in response_text.split('\n') if p.strip()]
-            all_payloads.extend(payloads)
-
-    # Remove duplicates while preserving order
-    unique_payloads = list(dict.fromkeys(all_payloads))
-    
-    if unique_payloads:
-        output.print(f"  [AI INFO] Generated {len(unique_payloads)} unique payloads from {len(tasks)} AI(s).")
-    else:
-        output.print(f"  [AI WARNING] No payloads were generated by the AI(s).")
+        prompt = f"""
+        As a world-class penetration tester, I am testing for {vulnerability_type}.
+        My initial payload was: `{base_payload}`
+        The server returned this response snippet (might be HTML, an error, or a WAF block page):
+        --- RESPONSE SNIPPET ---
+        {response_snippet}
+        --- END OF SNIPPET ---
+        This response suggests my payload was blocked or ineffective. Please analyze the response and the initial payload.
+        Based on your analysis, provide a list of 5-10 creative, alternative payloads designed to bypass the detected protection.
+        Focus on obfuscation, alternative syntax, encoding, or other bypass techniques relevant to {vulnerability_type}.
         
-    return unique_payloads
+        IMPORTANT: Provide only the raw payloads, each on a new line. Do not add any explanations, comments, or formatting like bullet points or numbering.
+        """
+        tasks.append(asyncio.create_task(GEMINI_MODEL.generate_content_async(prompt)))
+
+    # Create task for Claude if available
+    if CLAUDE_MODEL:
+        claude_prompt = f"""
+        You are a world-class penetration tester. I am testing for {vulnerability_type}.
+        My initial payload was: `{base_payload}`
+        The server returned this response snippet:
+        <response_snippet>
+        {response_snippet}
+        </response_snippet>
+        This suggests my payload was blocked. Analyze the response and generate a list of 5-10 creative, alternative payloads to bypass the protection. Focus on obfuscation, alternative syntax, and relevant bypass techniques.
+        IMPORTANT: Provide only the raw payloads, each on a new line. Do not add any explanations or formatting.
+        """
+        # Claude's API uses a different structure
+        claude_task = CLAUDE_MODEL.messages.create(
+            model="claude-3-haiku-20240307",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": claude_prompt}]
+        )
+        tasks.append(asyncio.create_task(claude_task))
+
+    all_payloads = set()
+    
+    try:
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        output.print(f"  [AI ERROR] An unexpected error occurred during asyncio.gather: {e}")
+        return []
+
+    for i, res in enumerate(responses):
+        # Determine which AI the response is from
+        ai_name = "Unknown"
+        if GEMINI_MODEL and CLAUDE_MODEL:
+            ai_name = "Gemini" if i == 0 else "Claude"
+        elif GEMINI_MODEL:
+            ai_name = "Gemini"
+        elif CLAUDE_MODEL:
+            ai_name = "Claude"
+
+        if isinstance(res, Exception):
+            output.print(f"  [AI ERROR] API call to {ai_name} failed: {res}")
+            continue
+
+        try:
+            # Handle response parsing for each AI
+            if hasattr(res, 'text'): # Gemini
+                raw_text = res.text
+            elif hasattr(res, 'content') and res.content: # Claude
+                raw_text = res.content[0].text
+            else:
+                raw_text = ""
+
+            # Filter and add payloads
+            payloads = [
+                p.strip() for p in raw_text.split('\n')
+                if p.strip() and not p.lower().startswith(("sure", "here are", "certainly", "okay", "i have generated", "here is a list"))
+            ]
+            if payloads:
+                all_payloads.update(payloads)
+                output.print(f"  [AI INFO] {ai_name} generated {len(payloads)} new payloads.")
+            else:
+                output.print(f"  [AI WARNING] {ai_name} did not return any valid payloads.")
+
+        except Exception as e:
+            output.print(f"  [AI ERROR] Failed to parse response from {ai_name}: {e}")
+
+    final_payloads = list(all_payloads)
+    if final_payloads:
+        output.print(f"  [AI INFO] Total unique payloads generated: {len(final_payloads)}.")
+    
+    return final_payloads
 
 async def ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_forms, output_handler):
     """
-    Uses Gemini & Claude AI in parallel to analyze initial discovery results and recommend an attack strategy.
+    Uses Gemini and/or Claude AI to analyze initial discovery results and recommend an attack strategy.
     Returns a prioritized list of attack function names.
     """
     if not GEMINI_MODEL and not CLAUDE_MODEL:
@@ -6518,27 +6185,33 @@ async def ai_analyze_scan_results(base_url, tech, report, discovered_urls, disco
     output_handler.print("\n" + "="*50)
     output_handler.print("  PHASE 1.5: AI-DRIVEN TARGET ANALYSIS")
     output_handler.print("="*50)
-    output_handler.print("  [AI MODE] Analyzing discovery results to determine attack strategy using available AIs...")
+    output_handler.print("  [AI MODE] Analyzing discovery results to determine attack strategy...")
 
     try:
-        # Consolidate discovery findings for the prompt
-        discovery_summary = f"Target: {base_url}\n\nTechnology Profile:\n"
+        # Consolidate discovery findings into a text block for the AI
+        discovery_summary = f"Target: {base_url}\n\n"
+        discovery_summary += "Technology Profile:\n"
         for key, value in tech.items():
-            if value != 'Unknown': discovery_summary += f"- {key.capitalize()}: {value}\n"
+            if value != 'Unknown':
+                discovery_summary += f"- {key.capitalize()}: {value}\n"
         
         scan_findings = [f for f in report.findings if f['severity'] == 'Info' or 'Nikto' in f['vulnerability'] or 'Nuclei' in f['vulnerability']]
         if scan_findings:
             discovery_summary += "\nInitial Scan Findings:\n"
-            for finding in scan_findings: discovery_summary += f"- {finding['vulnerability']}: {finding['description'][:100]}...\n"
+            for finding in scan_findings:
+                discovery_summary += f"- {finding['vulnerability']}: {finding['description'][:100]}...\n"
 
         if discovered_urls:
             discovery_summary += f"\nDiscovered URLs ({len(discovered_urls)} total):\n"
-            for url in discovered_urls[:15]: discovery_summary += f"- {url}\n"
-            if len(discovered_urls) > 15: discovery_summary += "- ...and more.\n"
+            for url in discovered_urls[:15]:
+                discovery_summary += f"- {url}\n"
+            if len(discovered_urls) > 15:
+                discovery_summary += "- ...and more.\n"
 
         if discovered_forms:
             discovery_summary += f"\nDiscovered Forms ({len(discovered_forms)} total):\n"
-            for form in discovered_forms[:5]: discovery_summary += f"- Action: {form['action']}, Method: {form['method']}, Inputs: {[i['name'] for i in form['inputs']]}\n"
+            for form in discovered_forms[:5]:
+                discovery_summary += f"- Action: {form['action']}, Method: {form['method']}, Inputs: {[i['name'] for i in form['inputs']]}\n"
 
         prompt = f"""
         As a senior penetration tester, analyze the following discovery information for the target {base_url}. 
@@ -6551,54 +6224,78 @@ async def ai_analyze_scan_results(base_url, tech, report, discovered_urls, disco
 
         Your analysis and prioritized list:
         """
-
-        # Define parallel API calls
-        async def call_gemini(p):
-            try:
-                response = await GEMINI_MODEL.generate_content_async(p)
-                return f"--- Gemini's Analysis ---\n{response.text}"
-            except Exception as e:
-                return f"--- Gemini Analysis Failed ---\n{e}"
-
-        async def call_claude(p):
-            try:
-                message = CLAUDE_MODEL.messages.create(model="claude-3-haiku-20240307", max_tokens=2048, messages=[{"role": "user", "content": p}])
-                return f"--- Claude's Analysis ---\n{message.content[0].text}"
-            except Exception as e:
-                return f"--- Claude Analysis Failed ---\n{e}"
-
-        tasks = []
-        if GEMINI_MODEL: tasks.append(call_gemini(prompt))
-        if CLAUDE_MODEL: tasks.append(call_claude(prompt))
         
-        ai_responses = await asyncio.gather(*tasks)
-        combined_analysis = "\n\n".join(ai_responses)
+        tasks = []
+        if GEMINI_MODEL:
+            tasks.append(asyncio.create_task(GEMINI_MODEL.generate_content_async(prompt)))
+        if CLAUDE_MODEL:
+            claude_task = CLAUDE_MODEL.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            tasks.append(asyncio.create_task(claude_task))
 
-        output_handler.print("\n  [AI INSIGHT] Attack Strategy Recommendation:")
-        output_handler.print(combined_analysis)
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        all_ai_texts = []
+        for i, res in enumerate(responses):
+            ai_name = "Unknown"
+            if GEMINI_MODEL and CLAUDE_MODEL:
+                ai_name = "Gemini" if i == 0 else "Claude"
+            elif GEMINI_MODEL:
+                ai_name = "Gemini"
+            elif CLAUDE_MODEL:
+                ai_name = "Claude"
 
-        # Extract attack function names from the combined analysis
+            output_handler.print(f"\n  [AI INSIGHT - {ai_name}] Attack Strategy Recommendation:")
+            if isinstance(res, Exception):
+                output_handler.print(f"    [ERROR] API call to {ai_name} failed: {res}")
+                continue
+            
+            try:
+                if hasattr(res, 'text'): # Gemini
+                    raw_text = res.text
+                elif hasattr(res, 'content') and res.content: # Claude
+                    raw_text = res.content[0].text
+                else:
+                    raw_text = "No response text found."
+                
+                all_ai_texts.append(raw_text)
+                ai_response_formatted = "\n".join([f"    {line}" for line in raw_text.split('\n')])
+                output_handler.print(ai_response_formatted)
+            except Exception as e:
+                output_handler.print(f"    [ERROR] Failed to parse response from {ai_name}: {e}")
+
+        # Combine recommendations from all AIs
         recommended_attacks = []
-        for line in combined_analysis.split('\n'):
-            if "SQL Injection" in line: recommended_attacks.append("check_sql_injection")
-            if "XSS" in line: recommended_attacks.append("check_xss")
-            if "Command Injection" in line: recommended_attacks.append("check_command_injection")
-            if "IDOR" in line: recommended_attacks.append("check_idor")
-            if "HTTP Smuggling" in line: recommended_attacks.append("check_http_smuggling")
-            if "LDAP Injection" in line: recommended_attacks.append("check_ldap_injection")
-            if "MongoDB" in line: recommended_attacks.append("scan_and_exploit_mongodb")
-            if "RTSP" in line: recommended_attacks.append("scan_rtsp")
-            if "Deserialization" in line: recommended_attacks.append("check_insecure_deserialization")
-            if "GraphQL" in line: recommended_attacks.append("check_graphql_injection")
-            if "CORS" in line: recommended_attacks.append("check_cors")
-            if "CRLF" in line: recommended_attacks.append("check_crlf")
-            if "Open Redirect" in line: recommended_attacks.append("check_open_redirect")
-            if "SSRF" in line: recommended_attacks.append("check_ssrf")
-            if "React2Shell" in line: recommended_attacks.append("scan_react2shell")
-            if "XXE" in line: recommended_attacks.append("check_xxe")
-            if "CSRF" in line: recommended_attacks.append("check_csrf")
-            if "File Inclusion" in line: recommended_attacks.append("check_file_inclusion")
-            if "Brute Force" in line: recommended_attacks.append("brute_force_login")
+        combined_text = " ".join(all_ai_texts).lower()
+        
+        attack_map = {
+            "check_sql_injection": ['sql injection', 'sqli'],
+            "check_xss": ['xss', 'cross-site scripting'],
+            "check_command_injection": ['command injection', 'cmdi'],
+            "check_idor": ['idor', 'insecure direct object reference'],
+            "check_http_smuggling": ['http smuggling', 'request smuggling'],
+            "check_ldap_injection": ['ldap injection'],
+            "scan_and_exploit_mongodb": ['mongodb'],
+            "scan_rtsp": ['rtsp', 'real time streaming protocol'],
+            "check_insecure_deserialization": ['deserialization'],
+            "check_graphql_injection": ['graphql'],
+            "check_cors": ['cors', 'cross-origin resource sharing'],
+            "check_crlf": ['crlf', 'response splitting'],
+            "check_open_redirect": ['open redirect'],
+            "check_ssrf": ['ssrf', 'server-side request forgery'],
+            "scan_react2shell": ['react', 'source map'],
+            "check_xxe": ['xxe', 'xml external entity'],
+            "check_csrf": ['csrf', 'cross-site request forgery'],
+            "check_file_inclusion": ['file inclusion', 'lfi', 'rfi'],
+            "brute_force_login": ['brute force', 'weak credentials', 'login']
+        }
+
+        for func_name, keywords in attack_map.items():
+            if any(keyword in combined_text for keyword in keywords):
+                recommended_attacks.append(func_name)
         
         return list(set(recommended_attacks))
 
@@ -6635,13 +6332,13 @@ def _is_valid_url(url):
 
 async def ai_generate_report_summary(report, output_handler):
     """
-    Generates an AI-powered executive summary by querying Gemini and Claude in parallel.
+    Generates an AI-powered executive summary from both Gemini and Claude.
     """
     if not GEMINI_MODEL and not CLAUDE_MODEL:
         output_handler.print("  [AI WARNING] No AI models initialized. Skipping AI report generation.")
         return ""
 
-    output_handler.print("\n[AI MODE] Generating AI-enhanced report summary from available AIs...")
+    output_handler.print("\n[AI MODE] Generating AI-enhanced report summaries from all available models...")
     try:
         findings_summary = "\n".join([f"- {f['vulnerability']} ({f['severity']}) at {f['url']}: {f['description']}" for f in report.findings])
         
@@ -6658,135 +6355,138 @@ async def ai_generate_report_summary(report, output_handler):
 
         Please format the output clearly with headings for each of the three sections.
         """
-
-        async def call_gemini(p):
-            try:
-                response = await GEMINI_MODEL.generate_content_async(p)
-                return f"--- Gemini's Report Summary ---\n{response.text}"
-            except Exception as e:
-                return f"--- Gemini Report Generation Failed ---\n{e}"
-
-        async def call_claude(p):
-            try:
-                message = CLAUDE_MODEL.messages.create(model="claude-3-haiku-20240307", max_tokens=4096, messages=[{"role": "user", "content": p}])
-                return f"--- Claude's Report Summary ---\n{message.content[0].text}"
-            except Exception as e:
-                return f"--- Claude Report Generation Failed ---\n{e}"
-
-        tasks = []
-        if GEMINI_MODEL: tasks.append(call_gemini(prompt))
-        if CLAUDE_MODEL: tasks.append(call_claude(prompt))
         
-        ai_responses = await asyncio.gather(*tasks)
-        combined_summary = "\n\n".join(ai_responses)
+        tasks = []
+        if GEMINI_MODEL:
+            tasks.append(asyncio.create_task(GEMINI_MODEL.generate_content_async(prompt)))
+        if CLAUDE_MODEL:
+            claude_task = CLAUDE_MODEL.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            tasks.append(asyncio.create_task(claude_task))
 
-        ai_summary_section = f"""
---------------------------------------------------------------------------------
- IV. AI-POWERED EXECUTIVE SUMMARY & REMEDIATION
---------------------------------------------------------------------------------
-{combined_summary}
-"""
-        output_handler.print("[AI INFO] AI summary has been generated from available AIs.")
-        return ai_summary_section
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        final_ai_summary = "\n\n" + "="*80 + "\n"
+        final_ai_summary += " IV. AI-POWERED ANALYSIS & RECOMMENDATIONS\n"
+        final_ai_summary += "="*80 + "\n"
+
+        for i, res in enumerate(responses):
+            ai_name = "Unknown"
+            if GEMINI_MODEL and CLAUDE_MODEL:
+                ai_name = "Gemini" if i == 0 else "Claude"
+            elif GEMINI_MODEL:
+                ai_name = "Gemini"
+            elif CLAUDE_MODEL:
+                ai_name = "Claude"
+
+            final_ai_summary += f"\n" + "-"*70 + "\n"
+            final_ai_summary += f"  {ai_name} AI Analysis\n"
+            final_ai_summary += "-"*70 + "\n"
+
+            if isinstance(res, Exception):
+                final_ai_summary += f"  [ERROR] API call to {ai_name} failed: {res}\n"
+                continue
+            
+            try:
+                if hasattr(res, 'text'): # Gemini
+                    raw_text = res.text
+                elif hasattr(res, 'content') and res.content: # Claude
+                    raw_text = res.content[0].text
+                else:
+                    raw_text = "No response text found."
+                final_ai_summary += f"\n{raw_text}\n"
+            except Exception as e:
+                final_ai_summary += f"  [ERROR] Failed to parse response from {ai_name}: {e}\n"
+
+        output_handler.print("[AI INFO] AI summaries have been generated.")
+        return final_ai_summary
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
         output_handler.print(f"[AI ERROR] Failed to generate AI report summary: {e}\nTraceback:\n{error_traceback}")
         return ""
 
-async def run_attack_sequence(target, session_cookies, output_handler, ai_enabled=False, scan_type='full', mode='1'):
+async def run_attack_sequence(target, session_cookies, output_handler, ai_enabled=False, scan_type='full'): # Added scan_type
     """Orchestrates the entire attack sequence, with an option for AI assistance."""
     if not _is_valid_url(target):
         output_handler.print(f"\n[ERROR] Invalid target URL provided: {target}. Please provide a full URL starting with http:// or https://")
         return
-
+    
     report = Report(target)
     tech = {'server': 'Unknown', 'backend': 'Unknown', 'framework': 'Unknown'}
-    base_url = normalize_target(target)
     
     if ai_enabled:
         output_handler.print("\n[AI MODE] AI assistance is enabled for this scan.")
+        # If AI mode is enabled and scan_type is exposed_services, run AI assist for it
+        if scan_type == 'exposed_services':
+            # We need to run scan_exposed_services first to get findings
+            # This is a bit tricky because scan_exposed_services needs nmap_output_file
+            # For now, we'll let run_all_attacks handle the execution and AI assist will be called later if needed.
+            pass # AI assist will be called after run_all_attacks if scan_type is exposed_services
 
-    # Define all possible attack modules
-    discovery_modules = [profile_target, scan_nmap, scan_nikto, scan_nuclei] # Spider is run separately
-    exploit_modules = [
-        scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, 
-        check_http_smuggling, check_graphql_injection, scan_react2shell,
-        check_sql_injection, check_xss, check_command_injection, check_idor, 
-        check_ldap_injection, check_insecure_deserialization, check_cors, 
-        check_crlf, check_open_redirect, check_ssrf, check_xxe, check_csrf, 
-        check_file_inclusion, brute_force_login
-    ]
+    # run_all_attacks will now return True if the secondary scan was run, False otherwise.
+    secondary_scan_was_run = await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled, scan_type=scan_type) # Pass scan_type
     
-    scan_type_map = {
-        'exposed_services': [scan_exposed_services], 'xss': [check_xss], 'sqli': [check_sql_injection],
-        'lfi': [check_file_inclusion], 'cmdi': [check_command_injection],
-        'rce': [check_command_injection, check_insecure_deserialization]
-    }
-
-    # --- Run Spider ONCE for all scan types to gather targets ---
-    output_handler.print("\n[+] Starting Discovery Spider to gather targets...")
-    discovered_urls, discovered_forms = await spider_target(base_url, output_handler, session_cookies=session_cookies)
-    all_url_targets = set(discovered_urls)
-    all_url_targets.add(base_url) # Always include the base URL for scanning
-    for form in discovered_forms:
-        all_url_targets.add(form['action'])
-    output_handler.print(f"[INFO] Spidering complete. Found {len(all_url_targets)} unique URLs/endpoints to test.")
-
-
-    if scan_type == 'full':
-        # --- PHASE 1: DISCOVERY (Primary) ---
-        await run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, False, discovery_modules, list(all_url_targets), discovered_forms, "DISCOVERY & PROFILING")
-        
-        primary_report_filename = f"report_primary_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
-        report.write_to_file(primary_report_filename)
-        output_handler.print(f"\n[SUCCESS] Primary discovery phase complete. Report saved to: {primary_report_filename}")
-
-        # --- USER PROMPT FOR SECONDARY PHASE ---
-        proceed = 'y'
-        if mode != '2': # Do not prompt in Web UI mode
-            try:
-                proceed = input("  [?] Proceed with Phase 2 (Exploitation)? (Y/n): ").lower().strip()
-            except EOFError: # Handle non-interactive environments
-                proceed = 'n'
-
-        if proceed == 'y':
-            # --- PHASE 2: EXPLOITATION (Secondary) ---
-            # Enable AI reordering for the exploit phase if AI is on
-            ai_should_reorder = True if ai_enabled else False
-            await run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, ai_should_reorder, exploit_modules, list(all_url_targets), discovered_forms, "EXPLOITATION")
-            
-            final_report_filename = f"report_final_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
-            ai_content = ""
-            if ai_enabled:
-                ai_content = await ai_generate_report_summary(report, output_handler)
-            
-            report.write_to_file(final_report_filename, append_content=ai_content)
-            output_handler.print(f"\n[SUCCESS] Full scan complete. Final report generated: {final_report_filename}")
-        else:
-            output_handler.print("\n[INFO] Exploitation phase skipped by user.")
-
-    else: # Specific scan type selected
-        modules_to_run = scan_type_map.get(scan_type)
-        if not modules_to_run:
-            output_handler.print(f"[ERROR] Invalid scan type '{scan_type}' selected.")
-            return
-            
-        phase_title = f"SPECIFIC SCAN: {scan_type.upper()}"
-        await run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, False, modules_to_run, list(all_url_targets), discovered_forms, phase_title)
-        
-        report_filename = f"report_{scan_type}_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+    # Only generate the final, comprehensive report if the secondary scan was executed.
+    if secondary_scan_was_run:
+        report_filename = f"report_final_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         ai_content = ""
         if ai_enabled:
             ai_content = await ai_generate_report_summary(report, output_handler)
         
         report.write_to_file(report_filename, append_content=ai_content)
-        output_handler.print(f"\n[SUCCESS] {scan_type.upper()} scan complete. Report generated: {report_filename}")
+        output_handler.print(f"\n[SUCCESS] Final comprehensive report generated: {report_filename}")
+    else:
+        output_handler.print(f"\n[INFO] Scan finished. Primary report has been saved.")
+
+    # NEW: Call AI assist for exposed services if enabled and scan_type matches
+    if ai_enabled and scan_type == 'exposed_services':
+        # The findings from scan_exposed_services are already in report.findings
+        exposed_services_findings = [f['description'] for f in report.findings if f['vulnerability'] == 'Exposed Service Vulnerability']
+        if exposed_services_findings:
+            await ai_assist_exposed_services(target, output_handler.output_dir, exposed_services_findings)
+    
+    # NEW: Call AI assist for all secondary attack modules if enabled and scan_type is 'full'
+    if ai_enabled and scan_type == 'full':
+        output_handler.print(f"\n[AI MODE] AI Assistant analyzing secondary attack findings for {target}...{Style.RESET_ALL}")
+        
+        # Map vulnerability types to their AI assist functions
+        ai_assist_map = {
+            "MongoDB Vulnerability": ai_assist_mongodb,
+            "RTSP Vulnerability": ai_assist_rtsp,
+            "Insecure Deserialization": ai_assist_insecure_deserialization,
+            "GraphQL Injection": ai_assist_graphql_injection,
+            "CORS Misconfiguration": ai_assist_cors,
+            "CRLF Injection": ai_assist_crlf,
+            "Open Redirect": ai_assist_open_redirect,
+            "SSRF Vulnerability": ai_assist_ssrf,
+            "React2Shell Vulnerability": ai_assist_react2shell,
+            "XXE Vulnerability": ai_assist_xxe,
+            "Cross-Site Request Forgery (CSRF)": ai_assist_csrf, # CSRF has multiple types, but we can group
+            "File Inclusion Vulnerability": ai_assist_file_inclusion,
+            "Brute Force Login": ai_assist_brute_force_login,
+        }
+
+        # Group findings by vulnerability type
+        grouped_findings = {}
+        for finding in report.findings:
+            vuln_type = finding['vulnerability']
+            if vuln_type in ai_assist_map:
+                if vuln_type not in grouped_findings:
+                    grouped_findings[vuln_type] = []
+                grouped_findings[vuln_type].append(finding['description'])
+        
+        for vuln_type, findings_list in grouped_findings.items():
+            ai_assist_func = ai_assist_map[vuln_type]
+            await ai_assist_func(target, output_handler.output_dir, findings_list)
     
 
 def _run_single_attack(args):
     """Helper function to run a single attack; designed to be called by ThreadPoolExecutor."""
-    attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms = args
+    attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, nmap_output_file_path = args # Added nmap_output_file_path
     check_name = f"{attack_func.__name__} on {url.split('/')[-1][:30]}"
     loop = None
     try:
@@ -6818,6 +6518,8 @@ def _run_single_attack(args):
             kwargs['discovered_urls'] = discovered_urls
         if 'discovered_forms' in sig.parameters:
             kwargs['discovered_forms'] = discovered_forms
+        if 'nmap_output_file' in sig.parameters: # New: Pass nmap_output_file to scan_exposed_services
+            kwargs['nmap_output_file'] = nmap_output_file_path
             
         # Handle discovery modules that use base_url
         if attack_func in [spider_target, profile_target, scan_nmap, scan_nikto, scan_nuclei, scan_and_exploit_mongodb, scan_rtsp]:
@@ -6836,7 +6538,7 @@ def _run_single_attack(args):
         if loop:
             loop.close()
 
-async def run_all_attacks(target, output_handler, tech, report, session_cookies, ai_enabled, ai_reorder_attacks, attack_modules_to_run, all_url_targets, discovered_forms, phase_name):
+async def run_all_attacks(target, output_handler, tech, report, session_cookies=None, ai_enabled=False, ai_reorder_attacks=False, scan_type='full'): # Added scan_type
     base_url = normalize_target(target)
     config = configparser.ConfigParser()
     
@@ -6848,79 +6550,146 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies,
                 configured_threads = int(config['PERFORMANCE']['threads'])
                 if configured_threads > 0:
                     num_threads = configured_threads
+                else:
+                    output_handler.print(f"\n[WARNING] Invalid 'threads' value in config.ini. Using default: {num_threads}.")
             except ValueError:
-                pass # Keep default if value is invalid
+                output_handler.print(f"\n[WARNING] Invalid 'threads' value in config.ini. Using default: {num_threads}.")
+    else:
+        output_handler.print(f"\n[INFO] Using default of {num_threads} threads for scanning.")
 
-    # --- AI-DRIVEN REORDERING ---
-    if ai_enabled and ai_reorder_attacks:
-        output_handler.print("\n[AI MODE] Analyzing discovery results to determine optimal attack strategy...")
-        try:
-            # This part needs the results from the discovery phase. 
-            # We assume discovery results are already in the report object from a previous phase.
-            recommended_attack_names = await ai_analyze_scan_results(base_url, tech, report, list(all_url_targets), discovered_forms, output_handler)
-            
-            if recommended_attack_names:
-                output_handler.print(f"\n[AI MODE] Reordering attacks based on AI recommendations: {', '.join(recommended_attack_names)}")
-                
-                def reorder_list(attack_list, recommendations):
-                    prioritized = [attack for rec in recommendations if (attack := next((a for a in attack_list if a.__name__ == rec), None))]
-                    remaining = [attack for attack in attack_list if attack not in prioritized]
-                    return prioritized + remaining
-                
-                attack_modules_to_run = reorder_list(attack_modules_to_run, recommended_attack_names)
-        except Exception as e:
-            output_handler.print(f"[AI ERROR] Failed to reorder attacks with AI: {e}")
-
-    # --- TASK PREPARATION ---
-    tasks = []
-    # The spider is now run outside this function. We receive the URLs/forms directly.
-
-    for attack_func in attack_modules_to_run:
-        # Skip spider_target as it's handled externally
-        if attack_func == spider_target:
-            continue
-
-        # Target-level attacks run once
-        if attack_func in [scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, check_http_smuggling, check_graphql_injection, scan_react2shell, scan_nmap, scan_nikto, scan_nuclei, profile_target]:
-            args = (attack_func, base_url, None, base_url, output_handler, tech, report, session_cookies, ai_enabled, list(all_url_targets), discovered_forms)
-            tasks.append(args)
-        # URL-level attacks run for each discovered URL/form
-        else:
-            for url in all_url_targets:
-                form_to_test = next((f for f in discovered_forms if f['action'] == url), None)
-                args = (attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, list(all_url_targets), discovered_forms)
-                tasks.append(args)
-
-    # --- TASK EXECUTION ---
-    if not tasks:
-        output_handler.print(f"  [INFO] No attack tasks to execute for this phase.")
-        return
-
+    # --- PHASE 1: DISCOVERY (Sequential) ---
     output_handler.print("\n" + "="*50)
-    output_handler.print(f"  {phase_name} (Running with {num_threads} threads)")
+    output_handler.print("  PHASE 1: DISCOVERY & PROFILING")
     output_handler.print("="*50)
+    
+    nmap_output_file_path = None # Initialize nmap_output_file_path
+    try:
+        await profile_target(base_url, output_handler, tech, report, session_cookies=session_cookies)
+        # These discovery scans are target-level and should run once.
+        nmap_output_file_path = await scan_nmap(base_url, output_handler, tech, report, session_cookies=session_cookies)
+        await scan_nikto(base_url, output_handler, tech, report, session_cookies=session_cookies)
+        await scan_nuclei(base_url, output_handler, tech, report, session_cookies=session_cookies)
+    except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        output_handler.print(f"\n[FATAL ERROR] during discovery phase: {repr(e)}\nTraceback:\n{error_traceback}")
+    
+    try:
+        discovered_urls, discovered_forms = await spider_target(base_url, output_handler, session_cookies=session_cookies)
+    except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        output_handler.print(f"  [ERROR] Advanced spider failed catastrophically: {e}\nTraceback:\n{error_traceback}")
+        discovered_urls, discovered_forms = [], []
 
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        futures = [executor.submit(_run_single_attack, task) for task in tasks]
+    # --- PHASE 1.5: AI-DRIVEN TARGET ANALYSIS ---
+    recommended_attacks = []
+    if ai_enabled and ai_reorder_attacks:
+        recommended_attacks = await ai_analyze_scan_results(base_url, tech, report, discovered_urls, discovered_forms, output_handler)
+
+    # --- PHASE 2: ATTACK & EXPLOITATION (Categorized & Phased) ---
+    
+    # 1. Categorize attacks
+    target_level_attacks = [
+        scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, 
+        check_http_smuggling, check_graphql_injection, scan_react2shell
+    ]
+    url_level_attacks = [
+        check_sql_injection, check_xss, check_command_injection, check_idor, 
+        check_ldap_injection, check_insecure_deserialization, check_cors, 
+        check_crlf, check_open_redirect, check_ssrf, check_xxe, check_csrf, 
+        check_file_inclusion, brute_force_login
+    ]
+
+    # 2. Handle scan_type selection
+    if scan_type != 'full':
+        scan_type_map = {
+            'exposed_services': [scan_exposed_services],
+            'xss': [check_xss],
+            'sqli': [check_sql_injection],
+            'lfi': [check_file_inclusion],
+            'cmdi': [check_command_injection],
+            'rce': [check_command_injection, check_insecure_deserialization] # Example for RCE
+        }
+        # Filter both lists to only include the selected scan type
+        selected_attacks = scan_type_map.get(scan_type, [])
+        target_level_attacks = [func for func in target_level_attacks if func in selected_attacks]
+        url_level_attacks = [func for func in url_level_attacks if func in selected_attacks]
+        if not target_level_attacks and not url_level_attacks:
+            output_handler.print(f"[WARNING] Scan type '{scan_type}' not found or has no associated modules. Running a full scan instead.")
+            # Re-populate for a full scan if selection was invalid
+            target_level_attacks = [scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, check_http_smuggling, check_graphql_injection, scan_react2shell]
+            url_level_attacks = [check_sql_injection, check_xss, check_command_injection, check_idor, check_ldap_injection, check_insecure_deserialization, check_cors, check_crlf, check_open_redirect, check_ssrf, check_xxe, check_csrf, check_file_inclusion, brute_force_login]
+
+    # 3. AI-based reordering (if enabled)
+    if ai_enabled and ai_reorder_attacks and recommended_attacks:
+        output_handler.print(f"\n[AI MODE] Reordering attacks based on AI recommendations: {', '.join(recommended_attacks)}")
         
-        progress_bar_desc = f"{phase_name} Progress"
-        if isinstance(output_handler, TerminalOutput):
-            with tqdm(total=len(futures), desc=progress_bar_desc, unit="task", dynamic_ncols=True) as pbar:
+        def reorder_list(attack_list, recommendations):
+            prioritized = [attack for rec in recommendations if (attack := next((a for a in attack_list if a.__name__ == rec), None))]
+            remaining = [attack for attack in attack_list if attack not in prioritized]
+            return prioritized + remaining
+
+        target_level_attacks = reorder_list(target_level_attacks, recommended_attacks)
+        url_level_attacks = reorder_list(url_level_attacks, recommended_attacks)
+
+    # 4. Define execution logic
+    def execute_tasks(phase_name, tasks):
+        global attack_progress
+        if not tasks:
+            output_handler.print(f"  [INFO] No tasks to execute for {phase_name}.")
+            return
+
+        output_handler.print("\n" + "="*50)
+        output_handler.print(f"  {phase_name} (Running with {num_threads} threads)")
+        output_handler.print("="*50)
+
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(_run_single_attack, task) for task in tasks]
+            
+            progress_bar_desc = f"{phase_name} Progress"
+            if isinstance(output_handler, TerminalOutput):
+                with tqdm(total=len(futures), desc=progress_bar_desc, unit="task", dynamic_ncols=True) as pbar:
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            output_handler.print(f'\n[ERROR] A task in {phase_name} generated an exception: {exc}')
+                        finally:
+                            pbar.update(1)
+            else: # For Web UI, just process them
                 for future in as_completed(futures):
                     try:
                         future.result()
                     except Exception as exc:
                         output_handler.print(f'\n[ERROR] A task in {phase_name} generated an exception: {exc}')
-                    finally:
-                        pbar.update(1)
-        else: # For Web UI
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as exc:
-                    output_handler.print(f'\n[ERROR] A task in {phase_name} generated an exception: {exc}')
 
-    output_handler.print(f"\n[INFO] {phase_name} completed.")
+    # --- 5. Orchestration ---
+    
+    # Execute Target-Level Attacks (Primary Phase)
+    primary_target_tasks = []
+    for attack_func in target_level_attacks:
+        # These attacks run against the base_url, no need for form_to_test here
+        args = (attack_func, base_url, None, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, nmap_output_file_path)
+        primary_target_tasks.append(args)
+    execute_tasks("PHASE 2.1: TARGET-LEVEL ATTACKS", primary_target_tasks)
+
+    # Execute URL-Level Attacks (Primary Phase)
+    primary_url_tasks = []
+    all_url_targets = set(discovered_urls)
+    for form in discovered_forms:
+        all_url_targets.add(form['action'])
+        
+    for url in all_url_targets:
+        form_to_test = next((f for f in discovered_forms if f['action'] == url), None)
+        for attack_func in url_level_attacks:
+            args = (attack_func, url, form_to_test, base_url, output_handler, tech, report, session_cookies, ai_enabled, discovered_urls, discovered_forms, nmap_output_file_path)
+            primary_url_tasks.append(args)
+    execute_tasks("PHASE 2.2: URL-LEVEL ATTACKS", primary_url_tasks)
+
+    output_handler.print("\n[INFO] All attack phases completed.")
+    
+    # For now, we always return True to generate the final report. The old logic of splitting primary/secondary reports is removed for simplification.
     return True
 # =================================================================================
 # 6. Flask 라우트 및 메인 실행 (v5.5 Ultimate Pro Max)
@@ -7005,128 +6774,149 @@ if __name__ == '__main__':
     session_cookies = {}
     ai_enabled = False
     config_file = 'config.ini'
-    
-    # Global model clients
-    GEMINI_MODEL = None
-    CLAUDE_MODEL = None
+    selected_scan_type = 'full' # Default scan type
 
     print("\n" + "="*40)
     print("  RAP0AT - Execution Mode Selection")
     print("="*40)
     print("  1: Terminal Mode (Classic Scan)")
     print("  2: Web UI Mode (Classic Scan)")
-    print("  3: AI-Assisted Mode (Gemini & Claude)")
+    print("  3: AI-Assisted Mode (Gemini / Claude)")
     print("="*40)
     
-    mode = input("  Enter your choice (1, 2, or 3): ").strip()
+    mode = input("  Enter your choice (1, 2, or 3): ")
 
-    if mode == '2':
-        print("\n[+] Web UI Mode Activated")
-        print("  [INFO] Launching Flask server...")
-        print("  [INFO] Please open your browser and navigate to http://0.0.0.0:5000")
-        log_queue = Queue()
-        app.run(host='0.0.0.0', port=5000)
+    if mode == '3':
+        ai_enabled = True
+        print("\n[+] AI-Assisted Mode Activated")
+        
+        config = configparser.ConfigParser()
+        
+        # If config.ini does not exist, create it with default structure
+        if not os.path.exists(config_file):
+            with open(config_file, 'w') as f:
+                f.write("[GEMINI]\napi_key = \n\n")
+                f.write("[CLAUDE]\napi_key = \n\n")
+                f.write("[PERFORMANCE]\nthreads = 100\n")
+            print(f"  [INFO] '{config_file}' created. Please configure your API keys.")
+        
+        config.read(config_file)
 
-    elif mode in ['1', '3']:
-        if mode == '3':
-            ai_enabled = True
-            print("\n[+] AI-Assisted Mode Activated")
-            
-            config = configparser.ConfigParser()
-            
-            # Create config if it doesn't exist
-            if not os.path.exists(config_file):
-                with open(config_file, 'w') as f:
-                    f.write("[GEMINI]\n# Gemini API 키를 입력하세요.\napi_key = \n\n")
-                    f.write("[CLAUDE]\n# Claude API 키를 입력하세요.\napi_key = \n\n")
-                    f.write("[PERFORMANCE]\n# 스레드 개수 (기본값: 100)\nthreads = 100\n")
-                print(f"  [INFO] '{config_file}' created. Please configure it.")
+        # Ensure sections exist
+        if 'GEMINI' not in config: config.add_section('GEMINI')
+        if 'CLAUDE' not in config: config.add_section('CLAUDE')
+        if 'PERFORMANCE' not in config: config.add_section('PERFORMANCE')
 
-            config.read(config_file)
+        # Load keys from config
+        gemini_api_key = config.get('GEMINI', 'api_key', fallback=None)
+        claude_api_key = config.get('CLAUDE', 'api_key', fallback=None)
 
-            # Load Gemini Key
-            gemini_api_key = config.get('GEMINI', 'api_key', fallback=None)
-            if not gemini_api_key:
-                gemini_api_key = input("  [?] Please enter your Google AI (Gemini) API Key (or press Enter to skip): ").strip()
-                if gemini_api_key and input(f"  [?] Save Gemini API Key to {config_file}? (y/n): ").lower() == 'y':
-                    if not config.has_section('GEMINI'): config.add_section('GEMINI')
-                    config.set('GEMINI', 'api_key', gemini_api_key)
-                    with open(config_file, 'w') as f: config.write(f)
-                    print(f"  [INFO] Gemini API Key saved to {config_file}.")
+        # Prompt for Gemini key if not found
+        if not gemini_api_key:
+            gemini_api_key_input = input("  [?] Enter your Google AI (Gemini) API Key (optional, press Enter to skip): ")
+            if gemini_api_key_input:
+                gemini_api_key = gemini_api_key_input
+                config.set('GEMINI', 'api_key', gemini_api_key)
 
-            # Load Claude Key
-            claude_api_key = config.get('CLAUDE', 'api_key', fallback=None)
-            if not claude_api_key:
-                claude_api_key = input("  [?] Please enter your Anthropic (Claude) API Key (or press Enter to skip): ").strip()
-                if claude_api_key and input(f"  [?] Save Claude API Key to {config_file}? (y/n): ").lower() == 'y':
-                    if not config.has_section('CLAUDE'): config.add_section('CLAUDE')
-                    config.set('CLAUDE', 'api_key', claude_api_key)
-                    with open(config_file, 'w') as f: config.write(f)
-                    print(f"  [INFO] Claude API Key saved to {config_file}.")
+        # Prompt for Claude key if not found
+        if not claude_api_key:
+            claude_api_key_input = input("  [?] Enter your Anthropic (Claude) API Key (optional, press Enter to skip): ")
+            if claude_api_key_input:
+                claude_api_key = claude_api_key_input
+                config.set('CLAUDE', 'api_key', claude_api_key)
 
-            # Check if at least one key is provided
-            if not gemini_api_key and not claude_api_key:
-                print("  [ERROR] AI-Assisted Mode requires at least one API Key (Gemini or Claude).")
-                sys.exit(1)
+        # Save updated config
+        with open(config_file, 'w') as f:
+            config.write(f)
 
-            # Configure available AI clients
-            if gemini_api_key:
-                try:
-                    # Try to use the modern configure method
-                    try:
-                        genai.configure(api_key=gemini_api_key)
-                        print("  [INFO] Gemini API configured using genai.configure().")
-                    except AttributeError:
-                        # Fallback for older library versions that don't have genai.configure()
-                        print("  [INFO] 'genai.configure()' not found. Falling back to environment variable for Gemini API key.")
-                        os.environ['GOOGLE_API_KEY'] = gemini_api_key
-                    
-                    # Now proceed with model initialization (gemini-1.5-flash then gemini-pro fallback)
-                    try:
-                        GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
-                        print("  [INFO] Gemini API client configured successfully with 'gemini-1.5-flash'.")
-                    except Exception as e_flash:
-                        print(f"  [AI WARNING] Could not initialize 'gemini-1.5-flash' (Reason: {e_flash}). Trying 'gemini-pro' as a fallback.")
-                        try:
-                            GEMINI_MODEL = genai.GenerativeModel('gemini-pro')
-                            print("  [INFO] Gemini API client configured successfully with fallback model 'gemini-pro'.")
-                        except Exception as e_pro:
-                            print(f"  [AI ERROR] Fallback model 'gemini-pro' also failed (Reason: {e_pro}). Disabling Gemini.")
-                            GEMINI_MODEL = None
-                except Exception as e: # Catch any other unexpected errors during the whole process
-                    print(f"  [ERROR] Failed to configure Gemini API: {e}")
-                    GEMINI_MODEL = None
-            
-            if claude_api_key:
-                try:
-                    CLAUDE_MODEL = anthropic.Anthropic(api_key=claude_api_key)
-                    print("  [INFO] Claude API client configured successfully.")
-                except Exception as e:
-                    print(f"  [ERROR] Failed to configure Claude API: {e}")
+        if not gemini_api_key and not claude_api_key:
+            print("  [ERROR] No AI API keys provided. AI-Assisted Mode cannot run.")
+            sys.exit(1)
 
-        target = input("  [?] Enter target URL/IP: ")
+        # Configure Gemini API if key is available
+        if gemini_api_key:
+            try:
+                genai.configure(api_key=gemini_api_key)
+                GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
+                print("  [INFO] Gemini API configured successfully.")
+            except Exception as e:
+                print(f"  [ERROR] Failed to configure Gemini API: {e}")
+        
+        # Configure Claude API if key is available
+        if claude_api_key:
+            try:
+                CLAUDE_MODEL = anthropic.AsyncAnthropic(api_key=claude_api_key)
+                print("  [INFO] Claude API configured successfully.")
+            except Exception as e:
+                print(f"  [ERROR] Failed to configure Claude API: {e}")
+
+        target = input("  [?] Enter target URL/IP for AI-Assisted Scan: ")
         cookies_raw = input("  [?] Enter session cookies if any (e.g., 'key1=val1; key2=val2'): ")
         if cookies_raw:
             session_cookies = {c.split('=')[0].strip(): c.split('=')[1].strip() for c in cookies_raw.split(';') if '=' in c}
-
-        print("\n  [?] Select Scan Type:")
-        print("    1: Full Scan (Discovery + Exploitation)")
-        print("    2: Exposed Services Scan")
+        
+        print("\n  [?] Select AI-Assisted Scan Type:")
+        print("    1: Full Scan (Comprehensive, AI-prioritized)")
+        print("    2: Exposed Services Scan (Focus on common service vulnerabilities)")
         print("    3: XSS Scan")
         print("    4: SQLi Scan")
         print("    5: LFI Scan")
         print("    6: CMDi Scan")
         print("    7: RCE Scan")
         
-        scan_type_choice = input("  Enter your choice (1-7): ").strip()
+        scan_type_choice = input("  Enter your choice (1-7): ")
+        
         scan_type_map = {
             '1': 'full', '2': 'exposed_services', '3': 'xss',
             '4': 'sqli', '5': 'lfi', '6': 'cmdi', '7': 'rce'
         }
-        selected_scan_type = scan_type_map.get(scan_type_choice, 'full')
-        print(f"  [INFO] Selected Scan Type: {selected_scan_type.upper()}")
         
-        asyncio.run(run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled, scan_type=selected_scan_type, mode=mode))
+        selected_scan_type = scan_type_map.get(scan_type_choice, 'full')
+        print(f"  [INFO] Selected AI-Assisted Scan Type: {selected_scan_type.upper()}")
+
+        asyncio.run(run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled, scan_type=selected_scan_type))
+
+    elif mode == '1':
+        target = input("  [?] Enter target URL/IP: ")
+        cookies_raw = input("  [?] Enter session cookies if any (e.g., 'key1=val1; key2=val2'): ")
+        if cookies_raw:
+            session_cookies = {c.split('=')[0].strip(): c.split('=')[1].strip() for c in cookies_raw.split(';') if '=' in c}
+        
+        print("\n  [?] Select Classic Scan Type:")
+        print("    1: Full Scan (Comprehensive)")
+        print("    2: Exposed Services Scan (Focus on common service vulnerabilities)")
+        print("    3: XSS Scan")
+        print("    4: SQLi Scan")
+        print("    5: LFI Scan")
+        print("    6: CMDi Scan")
+        print("    7: RCE Scan")
+        
+        scan_type_choice = input("  Enter your choice (1-7): ")
+        scan_type_map = {
+            '1': 'full',
+            '2': 'exposed_services',
+            '3': 'xss',
+            '4': 'sqli',
+            '5': 'lfi',
+            '6': 'cmdi',
+            '7': 'rce'
+        }
+        selected_scan_type = scan_type_map.get(scan_type_choice, 'full')
+        print(f"  [INFO] Selected Classic Scan Type: {selected_scan_type.upper()}")
+        
+        asyncio.run(run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled, scan_type=selected_scan_type))
+
+    elif mode == '2':
+        print("\n[+] Web UI Mode Activated")
+        print("  [INFO] Launching Flask server...")
+        print("  [INFO] Please open your browser and navigate to http://0.0.0.0:5000")
+        
+        log_queue = Queue()
+        
+        # AI is not yet integrated into the Web UI, so it runs in classic mode.
+        # The attack sequence is triggered via the /attack endpoint.
+        
+        app.run(host='0.0.0.0', port=5000)
 
     else:
         print("  [ERROR] Invalid mode selected. Exiting.")
