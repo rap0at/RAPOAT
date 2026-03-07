@@ -55,6 +55,6 @@ If you enter only one of the Gemini and Claud api keys, the tool will operate no
 
 ## Adjust the overall speed of the tool
 ```sh
-<img width="165" height="158" alt="thread" src="https://github.com/user-attachments/assets/7c27fc10-c40f-478d-881b-0545e6029cc3" />
 You can adjust the overall attack speed of the tool by adjusting the thread value in the config.ini file that is automatically generated in ai mode.
 ```
+<img width="165" height="158" alt="thread" src="https://github.com/user-attachments/assets/66d15fa4-d431-4be2-abf3-8b1a9e15f6e5" />
