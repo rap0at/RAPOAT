@@ -6,35 +6,55 @@
 ## Features
 
 - Main Page
-<img width="842" height="542" alt="main" src="https://github.com/user-attachments/assets/eea3abab-f1d9-473e-8355-d46596252f86" />
+<img width="601" height="360" alt="main" src="https://github.com/user-attachments/assets/6146b735-d1bb-4a69-873e-c387bb846eba" />
+
 
 - WEB MODE
-<img width="1703" height="845" alt="2026-01-14 05 32 27" src="https://github.com/user-attachments/assets/7c74abb0-ccb6-4978-bcd8-bad01481f68a" />
-<img width="1228" height="918" alt="2026-01-14 05 25 13" src="https://github.com/user-attachments/assets/b1c08f09-0156-4944-b1ea-ef2204575673" />
+<img width="965" height="522" alt="web1" src="https://github.com/user-attachments/assets/7a158cab-0053-41b1-a310-dd26df2c4cae" />
+<img width="1212" height="798" alt="web2" src="https://github.com/user-attachments/assets/3649ea16-99af-43e8-8d16-3d6b3f23d9b0" />
+
 
 - TERMINAL MODE
-<img width="849" height="585" alt="ter,oma;" src="https://github.com/user-attachments/assets/c77fd833-e3e2-41d3-852e-1976e49f47b8" />
+<img width="504" height="349" alt="terminal" src="https://github.com/user-attachments/assets/45f81290-bc1f-4222-a5d5-328793dff623" />
+
 
 - AI MODE
-<img width="909" height="650" alt="ai" src="https://github.com/user-attachments/assets/04690171-0627-4f87-bee0-47433716f53a" />
+<img width="651" height="404" alt="ai" src="https://github.com/user-attachments/assets/24bc1482-6dd4-4d41-b696-39f0c03816e7" />
 
-## Gemini API key require
+
+## Gemini or Claude API key require
 ```sh
 https://ai.google.dev/gemini-api/docs/api-key
+                    OR
+https://platform.claude.com/settings/keys
 ```
 
 ## Installation
 ```sh
-git clone https://github.com/rap0at/RAPOAT.git
 sudo apt update
 sudo apt install -y nmap && nikto && nuclei && smbclient && subfinder && gospider && snmpd && snmp && dig && ftp && sshpass && dnsutils
+git clone https://github.com/rap0at/RAPOAT.git
+cd RAPOAT
 chmod 777 *
+python3 -m venv venv
+source /venv/bin/activate
 pip3 install -r requirements.txt
-playwright install chromium
+playwright install
 python3 rapoat.py
 ```
 
 ## In case of lxml html err
 ```sh
 pip3 install 'lxml[html_clean]'
+```
+
+## API Key Options
+```sh
+If you enter only one of the Gemini and Claud api keys, the tool will operate normally.
+```
+
+## Adjust the overall speed of the tool
+```sh
+<img width="165" height="158" alt="thread" src="https://github.com/user-attachments/assets/7c27fc10-c40f-478d-881b-0545e6029cc3" />
+You can adjust the overall attack speed of the tool by adjusting the thread value in the config.ini file that is automatically generated in ai mode.
 ```
