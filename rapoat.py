@@ -27,6 +27,7 @@ import urllib3
 import aiohttp
 import asyncio
 from tqdm import tqdm
+import full_ai_mode
 
 import urllib3 # Ensure urllib3 is imported before use
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -7146,17 +7147,20 @@ if __name__ == '__main__':
     print("  1: Terminal Mode (Classic Scan)")
     print("  2: Web UI Mode (Classic Scan)")
     print("  3: AI-Assisted Mode (Gemini / Claude)")
+    print("  4: Full AI Mode (Autonomous Pentest)")
     print("="*40)
     
-    mode = input("  Enter your choice (1, 2, or 3): ")
+    mode = input("  Enter your choice (1, 2, 3, or 4): ")
 
-    if mode == '3':
+    if mode == '4' or mode == '3':
         ai_enabled = True
-        print("\n[+] AI-Assisted Mode Activated")
-        
+        if mode == '3':
+            print("\n[+] AI-Assisted Mode Activated")
+        else:
+            print("\n[+] Full AI Mode (Autonomous Pentest) Activated")
+
         config = configparser.ConfigParser()
         
-        # If config.ini does not exist, create it with default structure
         if not os.path.exists(config_file):
             with open(config_file, 'w') as f:
                 f.write("[GEMINI]\napi_key = \n\n")
@@ -7166,47 +7170,43 @@ if __name__ == '__main__':
         
         config.read(config_file)
 
-        # Ensure sections exist
         if 'GEMINI' not in config: config.add_section('GEMINI')
         if 'CLAUDE' not in config: config.add_section('CLAUDE')
         if 'PERFORMANCE' not in config: config.add_section('PERFORMANCE')
 
-        # Load keys from config
         gemini_api_key = config.get('GEMINI', 'api_key', fallback=None)
         claude_api_key = config.get('CLAUDE', 'api_key', fallback=None)
 
-        # Prompt for Gemini key if not found
         if not gemini_api_key:
             gemini_api_key_input = input("  [?] Enter your Google AI (Gemini) API Key (optional, press Enter to skip): ")
             if gemini_api_key_input:
                 gemini_api_key = gemini_api_key_input
                 config.set('GEMINI', 'api_key', gemini_api_key)
 
-        # Prompt for Claude key if not found
         if not claude_api_key:
             claude_api_key_input = input("  [?] Enter your Anthropic (Claude) API Key (optional, press Enter to skip): ")
             if claude_api_key_input:
                 claude_api_key = claude_api_key_input
                 config.set('CLAUDE', 'api_key', claude_api_key)
 
-        # Save updated config
         with open(config_file, 'w') as f:
             config.write(f)
 
         if not gemini_api_key and not claude_api_key:
-            print("  [ERROR] No AI API keys provided. AI-Assisted Mode cannot run.")
+            print("  [ERROR] No AI API keys provided. AI modes cannot run.")
             sys.exit(1)
 
-        # Configure Gemini API if key is available
         if gemini_api_key:
             try:
-                genai.configure(api_key=gemini_api_key)
+                # genai.configure(api_key=gemini_api_key) # Replaced due to AttributeError
+                # Bypass the helper and set the key on the default client directly
+                from google.generativeai import client as genai_client
+                genai_client.get_default_generative_client().api_key = gemini_api_key
                 GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
                 print("  [INFO] Gemini API configured successfully.")
             except Exception as e:
                 print(f"  [ERROR] Failed to configure Gemini API: {e}")
         
-        # Configure Claude API if key is available
         if claude_api_key:
             try:
                 CLAUDE_MODEL = anthropic.AsyncAnthropic(api_key=claude_api_key)
@@ -7214,34 +7214,40 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"  [ERROR] Failed to configure Claude API: {e}")
 
-        target = input("  [?] Enter target URL/IP for AI-Assisted Scan: ")
-        cookies_raw = input("  [?] Enter session cookies if any (e.g., 'key1=val1; key2=val2'): ")
-        if cookies_raw:
-            session_cookies = {c.split('=')[0].strip(): c.split('=')[1].strip() for c in cookies_raw.split(';') if '=' in c}
+        target = input("  [?] Enter target URL/IP for AI Scan: ")
         
-        print("\n  [?] Select AI-Assisted Scan Type:")
-        print("    1: Full Scan (Comprehensive, AI-prioritized)")
-        print("    2: Exposed Services Scan (Focus on common service vulnerabilities)")
-        print("    3: XSS Scan")
-        print("    4: SQLi Scan")
-        print("    5: LFI Scan")
-        print("    6: CMDi Scan")
-        print("    7: RCE Scan")
-        print("    8: SSTI Scan")
-        print("    9: BAC Scan (Broken Access Control)")
-        
-        scan_type_choice = input("  Enter your choice (1-9): ")
-        
-        scan_type_map = {
-            '1': 'full', '2': 'exposed_services', '3': 'xss',
-            '4': 'sqli', '5': 'lfi', '6': 'cmdi', '7': 'rce', '8': 'ssti',
-            '9': 'bac'
-        }
-        
-        selected_scan_type = scan_type_map.get(scan_type_choice, 'full')
-        print(f"  [INFO] Selected AI-Assisted Scan Type: {selected_scan_type.upper()}")
+        if mode == '3':
+            cookies_raw = input("  [?] Enter session cookies if any (e.g., 'key1=val1; key2=val2'): ")
+            if cookies_raw:
+                session_cookies = {c.split('=')[0].strip(): c.split('=')[1].strip() for c in cookies_raw.split(';') if '=' in c}
+            
+            print("\n  [?] Select AI-Assisted Scan Type:")
+            print("    1: Full Scan (Comprehensive, AI-prioritized)")
+            print("    2: Exposed Services Scan (Focus on common service vulnerabilities)")
+            print("    3: XSS Scan")
+            print("    4: SQLi Scan")
+            print("    5: LFI Scan")
+            print("    6: CMDi Scan")
+            print("    7: RCE Scan")
+            print("    8: SSTI Scan")
+            print("    9: BAC Scan (Broken Access Control)")
+            
+            scan_type_choice = input("  Enter your choice (1-9): ")
+            
+            scan_type_map = {
+                '1': 'full', '2': 'exposed_services', '3': 'xss',
+                '4': 'sqli', '5': 'lfi', '6': 'cmdi', '7': 'rce', '8': 'ssti',
+                '9': 'bac'
+            }
+            
+            selected_scan_type = scan_type_map.get(scan_type_choice, 'full')
+            print(f"  [INFO] Selected AI-Assisted Scan Type: {selected_scan_type.upper()}")
 
-        asyncio.run(run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled, scan_type=selected_scan_type))
+            asyncio.run(run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled, scan_type=selected_scan_type))
+        
+        elif mode == '4':
+            # Run the full autonomous AI mode
+            full_ai_mode.run_full_ai_mode(target, config_file)
 
     elif mode == '1':
         target = input("  [?] Enter target URL/IP: ")
