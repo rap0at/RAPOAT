@@ -31,6 +31,9 @@ class FullAIModeRunner:
         self.claude_failures = 0
         self.max_failures = 5
 
+        # Ensure the output directory exists before any logging attempts.
+        os.makedirs(self.output_dir, exist_ok=True)
+
     def _normalize_target(self, target):
         if not target.startswith(('http://', 'https://')):
             return f"http://{target}"
@@ -53,7 +56,6 @@ class FullAIModeRunner:
 
     def _setup(self):
         """Initializes directories, loads configs, and sets up AI models."""
-        os.makedirs(self.output_dir, exist_ok=True)
         self._log(f"Output directory created at: {self.output_dir}")
         self._log(f"Report file will be saved to: {self.report_file}")
 
@@ -330,10 +332,10 @@ Based on these results, what is your first command?
 
     def run(self):
         """The main entry point for the Full AI Mode runner."""
-        self._log("--- Initializing Full AI Mode ---")
         if not self._setup():
             return
 
+        self._log("--- Initializing Full AI Mode ---")
         scan_results = self._run_scans()
         self._run_ai_pentest(scan_results)
         
