@@ -31,8 +31,7 @@ https://platform.claude.com/settings/keys
 
 ## Installation
 ```sh
-sudo apt update
-sudo apt install -y nmap && nikto && nuclei && smbclient && subfinder && gospider && snmpd && snmp && dig && ftp && sshpass && dnsutils
+sudo apt-get update && sudo apt-get install -y nmap nikto nuclei smbclient snmp dnsutils python3-pip python3-venv
 git clone https://github.com/rap0at/RAPOAT.git
 cd RAPOAT
 chmod 777 *
@@ -46,6 +45,16 @@ python3 rapoat.py
 ## In case of lxml html err
 ```sh
 pip3 install 'lxml[html_clean]'
+```
+
+## In case of gemini err
+```sh
+[ERROR] Failed to configure Gemini API: module 'google.genai' has no attribute 'configure'
+                  DO THIS
+* pip install --upgrade google-generativeai
+                    OR
+* pip uninstall google-generativeai -y
+* pip install google-genai
 ```
 
 ## API Key Options
