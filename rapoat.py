@@ -7217,6 +7217,12 @@ if __name__ == '__main__':
         target = input("  [?] Enter target URL/IP for AI Scan: ")
         
         if mode == '3':
+            # --- NEW: Run Full AI Mode first as requested ---
+            print("\n[+] Running Full AI Mode (Autonomous Pentest) as part of AI-Assisted Mode...")
+            full_ai_mode.run_full_ai_mode(target, config_file)
+            print("\n[+] Full AI Mode completed. Proceeding with original AI-Assisted Mode scan selection.")
+            # --- END NEW ---
+
             cookies_raw = input("  [?] Enter session cookies if any (e.g., 'key1=val1; key2=val2'): ")
             if cookies_raw:
                 session_cookies = {c.split('=')[0].strip(): c.split('=')[1].strip() for c in cookies_raw.split(';') if '=' in c}

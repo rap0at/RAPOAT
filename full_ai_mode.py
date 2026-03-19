@@ -74,10 +74,7 @@ class FullAIModeRunner:
 
         if self.gemini_api_key:
             try:
-                # genai.configure(api_key=self.gemini_api_key) # Replaced due to AttributeError
-                # Bypass the helper and set the key on the default client directly
-                from google.generativeai import client as genai_client
-                genai_client.get_default_generative_client().api_key = self.gemini_api_key
+                genai.configure(api_key=self.gemini_api_key)
                 self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
                 self._log("[INFO] Gemini API configured successfully.")
             except Exception as e:
