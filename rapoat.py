@@ -23,6 +23,7 @@ import html
 import copy # Added for deepcopy
 import configparser
 import google.genai as genai
+import google.generativeai as genai
 import anthropic
 import urllib3
 import aiohttp
